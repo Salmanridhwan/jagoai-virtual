@@ -1,0 +1,42 @@
+[tenant]
+slug = "jagoai"
+
+[[slot]]
+jam = "07:00"
+agent = "vera"
+tugas = "susun ringkasan angka kemarin dari data yang ada, sebutkan berkas asalnya, jangan mengarang angka"
+
+[[slot]]
+jam = "08:30"
+agent = "mira"
+tugas = "tulis satu sasaran pekan ini dan tiga alasan mengapa sasaran itu dipilih"
+
+[[slot]]
+jam = "09:00"
+agent = "rian"
+tugas = "usulkan urutan tiga slot untuk pekan ini, cukup tanggal, format, dan alasan urutannya"
+
+[[slot]]
+jam = "09:30"
+agent = "nadia"
+tugas = "tulis tiga varian hook untuk satu topik dari brief pekan, lalu pilih satu dan jelaskan alasannya"
+
+[[slot]]
+jam = "11:00"
+agent = "dewi"
+tugas = "sebutkan tiga aturan desain feed yang kau pakai, dan satu hal yang membuatmu menolak naskah"
+
+[[slot]]
+jam = "13:00"
+agent = "doni"
+tugas = "sebutkan tiga hal yang kau periksa sebelum menyunting video, dan apa yang kau lakukan kalau bahan kurang"
+
+[[slot]]
+jam = "16:00"
+agent = "omar"
+tugas = "sebutkan tiga ambang mutu yang kau pakai untuk menilai video pendek, dan kapan kau menolak"
+
+[[slot]]
+jam = "17:00"
+agent = "kiki"
+tugas = "sebutkan dua syarat sebelum mengunggah, dan apa yang kau tulis kalau token kanal tidak ada"

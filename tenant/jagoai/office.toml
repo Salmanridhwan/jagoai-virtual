@@ -1,0 +1,121 @@
+[tenant]
+slug = "jagoai"
+nama = "JagoAI"
+paket = "dasar"
+mulai = 2026-11-02
+
+[gerbang]
+base_url = "https://9router.jagoai.dev/v1"
+kunci_env = "JAGOAI_ROUTER_KEY"
+batas_harian_tenant = 4200000
+
+[bahan]
+cdn_url = "https://cdn.kroombox.com"
+cdn_proyek = "jagoai-sosmed"
+cdn_kunci_env = "JAGOAI_CDN_API_KEY"
+cdn_jwt_env = "JAGOAI_CDN_JWT_TOKEN"
+
+[kanal]
+threads_env = "JAGOAI_THREADS_TOKEN"
+instagram_env = "JAGOAI_INSTAGRAM_TOKEN"
+tiktok_env = "JAGOAI_TIKTOK_TOKEN"
+
+[karyawan.mira]
+jabatan = "Kepala Studio"
+meja = "ruang:brief"
+model = "cbai/glm-5.2"
+model_kelas = "standar"
+maks_token = 1000
+rencana_token_harian = 400000
+batas_shift = 20000
+izin_ambient = true
+
+[karyawan.rian]
+jabatan = "Perencana Konten"
+meja = "tetap:1"
+model = "cbai/kimi-k2.6"
+model_kelas = "standar"
+maks_token = 1400
+rencana_token_harian = 450000
+batas_shift = 20000
+izin_ambient = true
+
+[karyawan.nadia]
+jabatan = "Penulis Naskah dan Caption"
+meja = "tetap:2"
+model = "cbai/kimi-k2.6"
+model_kelas = "standar"
+maks_token = 1400
+rencana_token_harian = 500000
+batas_shift = 20000
+izin_ambient = true
+
+[karyawan.bayu]
+jabatan = "Pemantau Percakapan"
+meja = "tetap:6"
+model = "cbai/kimi-k2.6"
+model_kelas = "standar"
+maks_token = 1200
+rencana_token_harian = 400000
+batas_shift = 20000
+izin_ambient = true
+
+[karyawan.sinta]
+jabatan = "Penyusun Balasan"
+meja = "tetap:7"
+model = "cbai/kimi-k2.6"
+model_kelas = "standar"
+maks_token = 1200
+rencana_token_harian = 450000
+batas_shift = 20000
+izin_ambient = true
+
+[karyawan.doni]
+jabatan = "Penyunting Video"
+meja = "ruang:sunting"
+model = "cbai/kimi-k2.6"
+model_kelas = "standar"
+maks_token = 1200
+rencana_token_harian = 500000
+batas_shift = 20000
+izin_ambient = true
+
+[karyawan.omar]
+jabatan = "Peninjau Mutu"
+meja = "tetap:10"
+model = "cbai/glm-5.2"
+model_kelas = "standar"
+maks_token = 1000
+rencana_token_harian = 350000
+batas_shift = 20000
+izin_ambient = true
+
+[karyawan.kiki]
+jabatan = "Distribusi dan Unggah"
+meja = "tetap:8"
+model = "cbai/kimi-k2.6"
+model_kelas = "standar"
+maks_token = 800
+rencana_token_harian = 300000
+batas_shift = 20000
+izin_ambient = true
+
+[karyawan.vera]
+jabatan = "Analis Kinerja"
+meja = "tetap:9"
+model = "cbai/glm-5.2"
+model_kelas = "standar"
+maks_token = 1200
+rencana_token_harian = 400000
+batas_shift = 20000
+izin_ambient = true
+
+[karyawan.dewi]
+jabatan = "Desainer Feed"
+meja = "ruang:studio"
+model = "cbai/glm-5.2"
+model_kelas = "standar"
+maks_token = 1200
+rencana_token_harian = 450000
+batas_shift = 20000
+izin_ambient = true

@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+tenant/*/.env
+tenant/*/events.jsonl
+tenant/*/state/

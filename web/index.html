@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<title>Kantor jagoai-virtual</title>
+<style>
+  :root {
+    --bg:#14161a; --panel:#1c1f26; --line:#2b303a; --teks:#e6e8ee; --redup:#98a0ad;
+    --type:#5ad48a; --read:#5aa9f0; --think:#b48ef0; --render:#e8b34a; --review:#4fd1c5;
+    --error:#ef6b6b; --blocked:#f0913a; --ship:#f5d76e; --walk:#a9b3c1; --sit:#7a8494;
+    --coffee:#b58a5f; --idle:#4a5260; --sleep:#20242c;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--teks);
+         font:13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  header { display:flex; align-items:baseline; gap:16px; padding:10px 16px;
+           border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header h1 { font-size:14px; margin:0; font-weight:600; letter-spacing:.3px; }
+  header .meta { color:var(--redup); }
+  main { display:flex; gap:16px; padding:16px; align-items:flex-start; flex-wrap:wrap; }
+  #kanvas { background:#0f1115; border:1px solid var(--line); border-radius:6px; display:block; }
+  aside { flex:1; min-width:300px; display:flex; flex-direction:column; gap:8px; }
+  .kartu { background:var(--panel); border:1px solid var(--line); border-radius:6px;
+           padding:8px 10px; cursor:pointer; }
+  .kartu.aktif { border-color:#4f7cff; }
+  .baris1 { display:flex; justify-content:space-between; gap:8px; align-items:center; }
+  .nama { font-weight:600; }
+  .lencana { font-size:11px; padding:1px 7px; border-radius:9px; background:#2a2f3a; color:#cfd6e2; }
+  .jabatan { color:var(--redup); font-size:11px; }
+  .angka { color:var(--redup); font-size:11px; margin-top:3px; }
+  .riwayat { margin:6px 0 0; padding-left:16px; color:var(--redup); font-size:11px; }
+  .riwayat li { margin:1px 0; }
+  footer { padding:8px 16px 20px; color:var(--redup); font-size:11px; }
+  .legenda { display:flex; gap:10px; flex-wrap:wrap; margin-top:8px; }
+  .legenda span { display:inline-flex; align-items:center; gap:5px; }
+  .kotak { width:9px; height:9px; border-radius:2px; display:inline-block; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Kantor jagoai-virtual</h1>
+  <span class="meta" id="info">memuat…</span>
+  <span class="meta" id="diperbarui"></span>
+</header>
+
+<main>
+  <canvas id="kanvas" width="880" height="572"></canvas>
+  <aside id="daftar"></aside>
+</main>
+
+<footer>
+  Seni sementara: kotak warna, bukan sprite. Setiap warna berasal dari event di
+  events.jsonl, dan setiap kartu bisa dibuka untuk melihat lima event terakhir.
+  <div class="legenda" id="legenda"></div>
+</footer>
+
+<script>
+const TILE = 22;
+const KANVAS = document.getElementById('kanvas');
+const ctx = KANVAS.getContext('2d');
+
+const WARNA = {
+  type:'#5ad48a', read:'#5aa9f0', think:'#b48ef0', render:'#e8b34a', review:'#4fd1c5',
+  error:'#ef6b6b', blocked:'#f0913a', ship:'#f5d76e', walk:'#a9b3c1', sit:'#7a8494',
+  coffee:'#b58a5f', idle:'#4a5260', sleep:'#20242c'
+};
+
+// meja mengikuti Peta Kantor: nomor meja -> [kolom, baris]
+const MEJA = {
+  1:[9,3], 2:[9,4], 3:[9,5], 4:[9,6], 5:[9,7],
+  6:[22,14], 7:[27,14], 8:[9,13], 9:[9,10], 10:[22,18]
+};
+
+// ruang bernama, untuk karyawan yang tidak duduk di meja bernomor
+const RUANG = { brief:[4,4], sunting:[33,5], studio:[33,10], pantri:[4,18], arsip:[33,21] };
+
+function posisiMeja(teks) {
+  const t = teks || '';
+  const m = /^tetap:(\d+)$/.exec(t);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    if (MEJA[n]) return MEJA[n];
+  }
+  const r = /^ruang:([a-z]+)$/.exec(t);
+  if (r && RUANG[r[1]]) return RUANG[r[1]];
+  return [20, 13];
+}
+
+const ZONA = [
+  {x:2,  y:2,  w:7, h:5,  warna:'#1e2430', label:'ruang brief'},
+  {x:30, y:2,  w:8, h:6,  warna:'#1e2430', label:'ruang sunting'},
+  {x:30, y:9,  w:8, h:5,  warna:'#1e2430', label:'pojok studio'},
+  {x:2,  y:16, w:6, h:5,  warna:'#1e2430', label:'pantri'},
+  {x:31, y:19, w:8, h:5,  warna:'#1e2430', label:'arsip'},
+  {x:18, y:10, w:5, h:3,  warna:'#232a37', label:'papan jadwal'},
+  {x:18, y:16, w:5, h:3,  warna:'#232a37', label:'papan percakapan'}
+];
+
+let data = null;
+let dipilih = null;
+
+function nomorMeja(teks) {
+  const m = /^tetap:(\d+)$/.exec(teks || '');
+  return m ? parseInt(m[1], 10) : null;
+}
+
+function gambar() {
+  ctx.clearRect(0, 0, KANVAS.width, KANVAS.height);
+
+  // lantai
+  ctx.fillStyle = '#0f1115';
+  ctx.fillRect(0, 0, KANVAS.width, KANVAS.height);
+  ctx.strokeStyle = '#191d24';
+  ctx.lineWidth = 1;
+  for (let x = 0; x <= 40; x++) {
+    ctx.beginPath(); ctx.moveTo(x*TILE, 0); ctx.lineTo(x*TILE, 26*TILE); ctx.stroke();
+  }
+  for (let y = 0; y <= 26; y++) {
+    ctx.beginPath(); ctx.moveTo(0, y*TILE); ctx.lineTo(40*TILE, y*TILE); ctx.stroke();
+  }
+
+  // zona
+  ZONA.forEach(z => {
+    ctx.fillStyle = z.warna;
+    ctx.fillRect(z.x*TILE, z.y*TILE, z.w*TILE, z.h*TILE);
+    ctx.fillStyle = '#5a6472';
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.fillText(z.label, z.x*TILE + 6, z.y*TILE + 14);
+  });
+
+  if (!data) return;
+
+  data.karyawan.forEach(k => {
+    const pos = posisiMeja(k.meja);
+    const px = pos[0]*TILE, py = pos[1]*TILE;
+
+    // meja
+    ctx.fillStyle = '#2b303a';
+    ctx.fillRect(px - 4, py + 6, 20, 10);
+
+    // karakter
+    const warna = WARNA[k.state] || '#888';
+    ctx.fillStyle = warna;
+    ctx.fillRect(px + 1, py - 6, 12, 12);
+    if (dipilih === k.agent_id) {
+      ctx.strokeStyle = '#4f7cff';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(px - 2, py - 9, 18, 18);
+    }
+
+    // nama dan state, ditaruh di samping kanan supaya tidak bertumpuk
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.fillStyle = '#cfd6e2';
+    ctx.fillText(k.nama, px + 20, py + 4);
+    ctx.fillStyle = warna;
+    ctx.fillText(k.state, px + 20, py + 16);
+  });
+}
+
+function kartu(k) {
+  const el = document.createElement('div');
+  el.className = 'kartu' + (dipilih === k.agent_id ? ' aktif' : '');
+  const rencana = k.rencana_token ? k.rencana_token.toLocaleString('id-ID') : '-';
+  const riwayat = (k.events || []).slice(-3).reverse()
+    .map(e => `<li>${e.kind}</li>`).join('');
+  el.innerHTML = `
+    <div class="baris1">
+      <span class="nama">${k.nama}</span>
+      <span class="lencana" style="color:${WARNA[k.state] || '#cfd6e2'}">${k.state}</span>
+    </div>
+    <div class="jabatan">${k.jabatan}</div>
+    <div class="angka">token hari ini ${k.token_hari_ini.toLocaleString('id-ID')} dari rencana ${rencana}
+      · sebab ${k.sebab} · ${k.umur_detik === null ? '-' : k.umur_detik + 's'} lalu</div>
+    <ul class="riwayat">${riwayat || '<li>belum ada event</li>'}</ul>`;
+  el.onclick = () => { dipilih = k.agent_id; render(); };
+  return el;
+}
+
+function legenda() {
+  const wadah = document.getElementById('legenda');
+  wadah.innerHTML = '';
+  Object.keys(WARNA).forEach(s => {
+    if (s === 'sleep') return;
+    const el = document.createElement('span');
+    el.innerHTML = `<i class="kotak" style="background:${WARNA[s]}"></i>${s}`;
+    wadah.appendChild(el);
+  });
+}
+
+function render() {
+  gambar();
+  const daftar = document.getElementById('daftar');
+  daftar.innerHTML = '';
+  if (!data) return;
+  data.karyawan.forEach(k => daftar.appendChild(kartu(k)));
+
+  const batas = data.batas_tenant ? data.batas_tenant.toLocaleString('id-ID') : '-';
+  document.getElementById('info').textContent =
+    `tenant ${data.tenant} · ${data.tanggal} · token ${data.token_tenant_hari_ini.toLocaleString('id-ID')} dari ${batas} · ${data.total_event} event`;
+  document.getElementById('diperbarui').textContent =
+    'diperbarui ' + new Date().toLocaleTimeString('id-ID');
+}
+
+async function segarkan() {
+  try {
+    const r = await fetch('/api/state', { cache: 'no-store' });
+    if (!r.ok) throw new Error('status ' + r.status);
+    data = await r.json();
+    render();
+  } catch (e) {
+    document.getElementById('info').textContent = 'gagal membaca keadaan: ' + e.message;
+  }
+}
+
+legenda();
+segarkan();
+setInterval(segarkan, 2000);
+</script>
+</body>
+</html>
