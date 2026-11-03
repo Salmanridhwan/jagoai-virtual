@@ -68,6 +68,49 @@ python -m app.cli run --agent jagoai:nadia --tugas "tulis tiga varian hook untuk
 
 Keluaran: teks balasan, lalu `shift=... token=masuk+keluar`. Setiap shift menulis tiga event ke `tenant/jagoai/events.jsonl`: `shift_start`, `llm_call`, `shift_end`.
 
+## Tinjauan mutu
+
+```bash
+python -m app.cli tinjau --tanggal 2026-11-09 --pekan 2026-11-09
+```
+
+Dua lapis, dan keduanya harus lewat:
+
+| Lapis | Isi | Sifat |
+|---|---|---|
+| Teknis | video ada, resolusi sesuai rasio, durasi 15 sampai 60 detik, h264, faststart, laporan desain lulus, subjudul ada | dipastikan |
+| Isi | model menilai klaim tanpa dasar, larangan brief, dan kelayakan tayang, wajib menjawab JSON | dinilai |
+
+Aturan yang tidak boleh dilunakkan:
+
+- Putusan yang bentuknya tidak sah tidak pernah menjadi lulus. Statusnya `manual`.
+- `lulus: true` dari model tetap ditolak kalau ada temuan bertingkat `tolak`.
+- Angka berunit di naskah yang tidak ada di brief dicatat sebagai `angka_tanpa_dasar`, termasuk angka yang ditulis dengan kata seperti `tiga site`.
+
+Hasil disimpan di `tenant/jagoai/keluaran/tinjauan/<tanggal>.json` dan event `review_pass` atau `review_fail` masuk `events.jsonl`.
+
+Kode keluar: 0 lulus, 6 tolak, 7 manual.
+## Video
+
+```bash
+python -m app.cli video --tanggal 2026-11-09 --pekan 2026-11-09
+python -m app.cli video --tanggal 2026-11-09 --pekan 2026-11-09 --ukuran 1x1
+```
+
+Menyusun mp4 dari slide yang sudah lulus periksa desain, lalu mengukurnya dengan ffprobe.
+
+| Periksa | Angka |
+|---|---|
+| Resolusi | 1080x1920 untuk 9:16, 1080x1080 untuk 1:1 |
+| Durasi | 15 sampai 60 detik |
+| Kodek | h264, piksel `yuv420p` |
+| Faststart | atom `moov` harus sebelum `mdat` |
+| Audio | harus ada aliran audio |
+| Kenyaringan | dilaporkan hanya kalau ada isinya. Audio kosong ditulis kosong, tidak disebut -14 LUFS |
+
+Keluaran di `tenant/jagoai/keluaran/video/<tanggal>/`: berkas mp4 dan `subjudul.srt`.
+
+Catatan jujur: video masih berupa slide diam berdurasi empat detik per slide, tanpa rekaman produk dan tanpa suara. Yang dibuktikan di sini adalah pipa render dan pemeriksaannya, bukan mutu tayang.
 ## Desain feed
 
 ```bash

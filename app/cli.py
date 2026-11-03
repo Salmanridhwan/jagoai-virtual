@@ -55,6 +55,19 @@ def _argumen(argv):
     d.add_argument("--format", dest="format_", default="carousel")
     d.add_argument("--footer", default="jagoai")
 
+    v = sub.add_parser("video", help="susun video dari slide lalu periksa dengan ffprobe")
+    v.add_argument("--tenant", default="jagoai")
+    v.add_argument("--tanggal", required=True)
+    v.add_argument("--pekan", help="untuk mengambil teks subjudul dari naskah")
+    v.add_argument("--ukuran", default="9x16", choices=["9x16", "1x1"])
+    v.add_argument("--durasi", type=int, default=4, help="detik per slide")
+
+    o = sub.add_parser("tinjau", help="Omar menilai keluaran sebelum masuk antrean")
+    o.add_argument("--tenant", default="jagoai")
+    o.add_argument("--tanggal", required=True)
+    o.add_argument("--pekan")
+    o.add_argument("--kunci")
+
     return p.parse_args(argv)
 
 
@@ -113,6 +126,54 @@ def main(argv=None):
                 return 0
             print("penjadwal berjalan, tiap %d detik. Ctrl+C untuk berhenti." % a.jeda)
             penjadwal.putar(root, a.tenant, jeda=a.jeda)
+            return 0
+
+        if a.perintah == "tinjau":
+            from app import omar
+            h = omar.tinjau(root, a.tenant, a.tanggal, pekan=a.pekan or a.tanggal,
+                            kunci=_kunci(cfg, a.tenant, a.kunci))
+            print("status: %s" % h["status"])
+            if h["lapis_teknis"]:
+                for s in h["lapis_teknis"]:
+                    print("  teknis: %s" % s)
+            for t in h["temuan_isi"]:
+                print("  %s pada %s: %s (%s)" % (t.get("tingkat"), t.get("bagian", ""),
+                                                 t.get("alasan", ""), t.get("kutipan", "")))
+            if h["angka_tanpa_dasar"]:
+                print("  angka tanpa dasar di naskah: %s" % ", ".join(h["angka_tanpa_dasar"]))
+            print("tinjauan: %s" % h["berkas_tinjauan"])
+            return {"lulus": 0, "tolak": 6, "manual": 7}[h["status"]]
+
+        if a.perintah == "video":
+            from app import desain, video
+            folder = root / "tenant" / a.tenant / "keluaran" / "desain" / a.tanggal
+            if not folder.exists():
+                print("slide untuk %s belum ada, jalankan perintah desain dulu" % a.tanggal)
+                return 4
+            teks = []
+            if a.pekan:
+                naskah = sorted((root / "tenant" / a.tenant / "keluaran" / "naskah" / a.pekan)
+                                .glob(a.tanggal + "-*.md"))
+                if naskah:
+                    teks = desain.baca_slide(Path(naskah[0]).read_text(encoding="utf-8"))
+            ukuran = (1080, 1920) if a.ukuran == "9x16" else (1080, 1080)
+            h = video.susun(root, a.tenant, a.tanggal, folder, teks_slide=teks,
+                            ukuran=ukuran, durasi_per_slide=a.durasi)
+            info = video.ukur(h["berkas"])
+            print("%s %sx%s %.1f detik %s/%s byte=%d faststart=%s" % (
+                h["berkas"], info["lebar"], info["tinggi"], info["durasi"],
+                info["kodek_video"], info["kodek_audio"], info["ukuran_byte"], info["faststart"]))
+            suara = video.analisis_audio(h["berkas"])
+            if suara.get("audio_kosong"):
+                print("audio: kosong, kenyaringan tidak dilaporkan sebagai angka")
+            elif suara.get("terbaca"):
+                print("audio: %s LUFS" % suara.get("input_i"))
+            salah = video.periksa(info, ukuran)
+            if salah:
+                for s in salah:
+                    print("  pelanggaran: %s" % s)
+                return 6
+            print("periksa teknis: lulus")
             return 0
 
         if a.perintah == "desain":
