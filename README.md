@@ -68,6 +68,23 @@ python -m app.cli run --agent jagoai:nadia --tugas "tulis tiga varian hook untuk
 
 Keluaran: teks balasan, lalu `shift=... token=masuk+keluar`. Setiap shift menulis tiga event ke `tenant/jagoai/events.jsonl`: `shift_start`, `llm_call`, `shift_end`.
 
+## Laporan pekan
+
+```bash
+python -m app.cli laporan --pekan 2026-11-02
+```
+
+Menulis `tenant/jagoai/keluaran/laporan/<pekan>.md` dari berkas, bukan dari ingatan model.
+
+| Bagian | Sumber |
+|---|---|
+| Token per hari dan per karyawan | `events.jsonl`, hanya event `llm_call` supaya tidak terhitung dua kali |
+| Slot, naskah, desain, video | `keluaran/jadwal`, `keluaran/naskah`, `keluaran/desain`, `keluaran/video` |
+| Tinjauan, persetujuan, antrean, percakapan | berkas JSON harian di `keluaran/` |
+| Jangkauan | `tenant/jagoai/data/jangkauan.csv` kalau ada |
+| Sumber yang dibaca | tabel di akhir laporan |
+
+Aturan keras: kalau jangkauan tidak ada, laporan menulis **belum ada data jangkauan** dan tidak mengisi angka apa pun. Setiap laporan punya tabel sumber, jadi tiap angka bisa ditelusuri kembali ke berkasnya.
 ## Persetujuan dan antrean unggah
 
 ```bash

@@ -88,6 +88,10 @@ def _argumen(argv):
     an.add_argument("--tenant", default="jagoai")
     an.add_argument("--tanggal", required=True)
 
+    lp = sub.add_parser("laporan", help="Vera menyusun laporan pekan dari berkas nyata")
+    lp.add_argument("--tenant", default="jagoai")
+    lp.add_argument("--pekan", required=True, help="tanggal Senin, contoh 2026-11-02")
+
     return p.parse_args(argv)
 
 
@@ -146,6 +150,17 @@ def main(argv=None):
                 return 0
             print("penjadwal berjalan, tiap %d detik. Ctrl+C untuk berhenti." % a.jeda)
             penjadwal.putar(root, a.tenant, jeda=a.jeda)
+            return 0
+
+        if a.perintah == "laporan":
+            from app import vera
+            d = vera.tulis(root, a.tenant, a.pekan)
+            print("pekan %s | token %d | naskah %d | desain lulus %d | video %d | tinjauan %s" % (
+                d["pekan"], d["token_total"], d["isi"]["naskah"], d["isi"]["desain_lulus"],
+                d["isi"]["video"], d["isi"]["tinjauan"]))
+            print("jangkauan: %s" % ("ada, %d baris" % d["jangkauan"]["baris"]
+                                     if d["jangkauan"]["ada"] else "belum ada data"))
+            print("laporan: %s" % d["berkas"])
             return 0
 
         if a.perintah == "mira":
