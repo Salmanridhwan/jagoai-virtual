@@ -6,6 +6,7 @@ from pathlib import Path
 
 from app import brief, config, env, gateway, models_registry, penjadwal, runtime
 from app import papan, tugas as tugas_mod
+from app import percakapan
 
 
 def _argumen(argv):
@@ -68,6 +69,14 @@ def _argumen(argv):
     o.add_argument("--pekan")
     o.add_argument("--kunci")
 
+    k = sub.add_parser("percakapan", help="Bayu menyaring, Sinta menyusun draf balasan")
+    k.add_argument("--tenant", default="jagoai")
+    k.add_argument("--tanggal")
+    k.add_argument("--kanal", default="threads")
+    k.add_argument("--setujui", help="id draf yang disetujui manusia")
+    k.add_argument("--oleh", default="pemilik")
+    k.add_argument("--kunci")
+
     return p.parse_args(argv)
 
 
@@ -126,6 +135,26 @@ def main(argv=None):
                 return 0
             print("penjadwal berjalan, tiap %d detik. Ctrl+C untuk berhenti." % a.jeda)
             penjadwal.putar(root, a.tenant, jeda=a.jeda)
+            return 0
+
+        if a.perintah == "percakapan":
+            from app import percakapan
+            if a.setujui:
+                d = percakapan.setujui(root, a.tenant, a.setujui, a.oleh)
+                print("disetujui: %s oleh %s, rencana kirim %s" % (
+                    d["id"], d["disetujui_oleh"], d.get("rencana_kirim", "")))
+                return 0
+            h = percakapan.kerjakan(root, a.tenant, tanggal=a.tanggal, kanal=(a.kanal,),
+                                    kunci=_kunci(cfg, a.tenant, a.kunci))
+            print("sumber %s | calon %d | draf %d | ditolak %d | ditarik %d" % (
+                h["sumber"], h["calon"], len(h["draf"]), len(h["ditolak"]), len(h["ditarik"])))
+            for d in h["draf"]:
+                print("  %s @%s: %s" % (d["id"], d["akun"], d["draf"][:100]))
+            for d in h["ditolak"]:
+                print("  ditolak %s: %s" % (d["id"], d["alasan"]))
+            for d in h["ditarik"]:
+                print("  ditarik %s: %s" % (d["id"], d["alasan"]))
+            print("berkas: %s" % h["berkas"])
             return 0
 
         if a.perintah == "tinjau":
@@ -265,6 +294,12 @@ def main(argv=None):
     except tugas_mod.TugasGagal as e:
         print("tugas gagal: %s (%s)" % (e, "; ".join(e.kesalahan)))
         return 9
+    except percakapan.DrafGagal as e:
+        print("draf tidak bisa diputuskan: %s" % e)
+        return 9
+    except percakapan.SumberBelumAda as e:
+        print("sumber percakapan belum ada: %s" % e)
+        return 10
 
     return 1
 

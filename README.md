@@ -68,6 +68,35 @@ python -m app.cli run --agent jagoai:nadia --tugas "tulis tiga varian hook untuk
 
 Keluaran: teks balasan, lalu `shift=... token=masuk+keluar`. Setiap shift menulis tiga event ke `tenant/jagoai/events.jsonl`: `shift_start`, `llm_call`, `shift_end`.
 
+## Jalur percakapan
+
+```bash
+python -m app.cli percakapan --kanal threads
+python -m app.cli percakapan --setujui sampel-1 --oleh salman
+```
+
+Sumber percakapan yang jalan sekarang adalah berkas yang diisi manusia: `tenant/jagoai/masuk/percakapan.jsonl`, satu objek JSON per baris dengan `id`, `akun`, `kanal`, `teks`, `tautan`.
+
+| Penyaring Bayu | Alasan ditolak |
+|---|---|
+| kanal tidak aktif | hanya kanal yang diminta yang diproses |
+| teks kurang dari 12 huruf | tidak cukup untuk dinilai |
+| di luar bidang | tidak menyentuh kata kunci `[merek]` |
+| tanpa tautan asal | tidak bisa dilacak kembali |
+| akun sudah dibalas dalam 7 hari | mencegah mengejar orang yang sama |
+
+| Aturan Sinta | Angka |
+|---|---|
+| Balasan per hari | 20 |
+| Jeda antar balasan | 3 menit |
+| Kemiripan antar draf | di atas 85 persen ditolak |
+| Penjaga keluaran | identitas, tahun, angka, larangan brief |
+
+Draf disimpan di `tenant/jagoai/keluaran/percakapan/<tanggal>.json` dengan status `menunggu_persetujuan`. Tidak ada pengiriman di tahap ini. Persetujuan mengubah status menjadi `disetujui` dan mencatat `disetujui_oleh`.
+
+Sumber API sudah ada pintunya, tetapi menolak jalan tanpa `JAGOAI_THREADS_TOKEN`. Pesannya jelas, bukan diam-diam kosong.
+
+Berkas `masuk/percakapan.jsonl` yang ada sekarang berisi enam baris **sampel** bertanda `sumber: sampel`, dipakai untuk menguji pipa. Itu bukan percakapan Threads yang sungguhan.
 ## Tinjauan mutu
 
 ```bash
