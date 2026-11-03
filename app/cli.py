@@ -6,7 +6,7 @@ from pathlib import Path
 
 from app import brief, config, env, gateway, models_registry, penjadwal, runtime
 from app import papan, tugas as tugas_mod
-from app import percakapan
+from app import percakapan, peran
 
 
 def _argumen(argv):
@@ -92,6 +92,18 @@ def _argumen(argv):
     lp.add_argument("--tenant", default="jagoai")
     lp.add_argument("--pekan", required=True, help="tanggal Senin, contoh 2026-11-02")
 
+    dt = sub.add_parser("data", help="lima tabel mode data dari berkas nyata")
+    dt.add_argument("--tenant", default="jagoai")
+    dt.add_argument("--tabel", default="ringkasan", choices=("ringkasan", "karyawan", "keluaran",
+                                                             "percakapan", "biaya", "semua"))
+    dt.add_argument("--pekan", required=True)
+    dt.add_argument("--ekspor", choices=("csv", "json"))
+    dt.add_argument("--cocokkan", action="store_true", help="bandingkan dengan angka Vera")
+
+    kt = sub.add_parser("kontrol", help="layar admin: ringkasan semua tenant")
+    kt.add_argument("--pekan", required=True)
+    kt.add_argument("--peran", default="admin", choices=("pengguna", "admin"))
+
     return p.parse_args(argv)
 
 
@@ -123,7 +135,8 @@ def periksa_env(root, tenant):
 def main(argv=None):
     a = _argumen(argv)
     try:
-        cfg = config.load(a.tenant, root=a.root) if a.root else config.load(a.tenant)
+        tenant_cfg = getattr(a, "tenant", "jagoai")
+        cfg = config.load(tenant_cfg, root=a.root) if a.root else config.load(tenant_cfg)
         root = Path(cfg["_root"])
         base_url = getattr(a, "base_url", None) or cfg["gerbang"]["base_url"]
         kunci_arg = getattr(a, "kunci", None)
@@ -150,6 +163,37 @@ def main(argv=None):
                 return 0
             print("penjadwal berjalan, tiap %d detik. Ctrl+C untuk berhenti." % a.jeda)
             penjadwal.putar(root, a.tenant, jeda=a.jeda)
+            return 0
+
+        if a.perintah == "data":
+            from app import data
+            if a.cocokkan:
+                selisih = data.cocokkan(root, a.tenant, a.pekan)
+                print("selisih dengan Vera: %d" % len(selisih))
+                for s in selisih:
+                    print("  %s: tabel %s, vera %s" % (s["angka"], s["tabel"], s["vera"]))
+                return 0 if not selisih else 6
+            nama = list(data.TABEL) if a.tabel == "semua" else [a.tabel]
+            for t in nama:
+                if a.ekspor:
+                    berkas, jumlah = data.ekspor(root, a.tenant, t, a.pekan, a.ekspor)
+                    print("%-11s %3d baris -> %s" % (t, jumlah, berkas))
+                else:
+                    baris = data.tabel(t, root, a.tenant, a.pekan)
+                    print("%s: %d baris" % (t, len(baris)))
+                    for b in baris[:3]:
+                        print("   " + " | ".join("%s=%s" % (k, v) for k, v in b.items()
+                                                 if k not in ("draf", "naskah", "tautan")))
+                    if len(baris) > 3:
+                        print("   ... %d baris lain" % (len(baris) - 3))
+            return 0
+
+        if a.perintah == "kontrol":
+            from app import peran
+            peran.wajib(a.peran, "lihat_semua_tenant")
+            for h in peran.ringkas_platform(root, a.pekan):
+                print("%-10s token %-7d naskah %-3d video %-3d galat %d" % (
+                    h["tenant"], h["token"], h["naskah"], h["video"], h["galat"]))
             return 0
 
         if a.perintah == "laporan":
@@ -195,7 +239,6 @@ def main(argv=None):
             return 0
 
         if a.perintah == "percakapan":
-            from app import percakapan
             if a.setujui:
                 d = percakapan.setujui(root, a.tenant, a.setujui, a.oleh)
                 print("disetujui: %s oleh %s, rencana kirim %s" % (
@@ -351,6 +394,9 @@ def main(argv=None):
     except tugas_mod.TugasGagal as e:
         print("tugas gagal: %s (%s)" % (e, "; ".join(e.kesalahan)))
         return 9
+    except peran.AksesDitolak as e:
+        print("akses ditolak: %s" % e)
+        return 11
     except percakapan.DrafGagal as e:
         print("draf tidak bisa diputuskan: %s" % e)
         return 9

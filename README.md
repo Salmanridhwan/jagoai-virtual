@@ -68,6 +68,25 @@ python -m app.cli run --agent jagoai:nadia --tugas "tulis tiga varian hook untuk
 
 Keluaran: teks balasan, lalu `shift=... token=masuk+keluar`. Setiap shift menulis tiga event ke `tenant/jagoai/events.jsonl`: `shift_start`, `llm_call`, `shift_end`.
 
+## Mode data dan kontrol admin
+
+```bash
+python -m app.cli data --tabel ringkasan --pekan 2026-11-02
+python -m app.cli data --tabel semua --pekan 2026-11-02 --ekspor csv
+python -m app.cli data --pekan 2026-11-02 --cocokkan     # selisih dengan Vera wajib 0
+python -m app.cli kontrol --pekan 2026-11-02             # peran admin
+```
+
+Lima tabel: `ringkasan`, `karyawan`, `keluaran`, `percakapan`, `biaya`. Semuanya dibaca dari berkas yang sama dengan laporan Vera, dan `--cocokkan` membandingkan tujuh angka kunci. Selisih bukan tafsir, itu cacat, dan kode keluarnya 6.
+
+Di server: `/data` (lima tabel, saringan, unduh CSV atau JSON), `/kontrol` (ringkasan semua tenant), `/api/data/<tabel>?pekan=&format=csv`, `/api/cocokkan?pekan=`, `/api/kontrol?pekan=`.
+
+| Peran | Boleh | Tidak boleh |
+|---|---|---|
+| pengguna | menyetujui konten dan balasan, ubah brief, lihat kantor dan data | mengubah batas, model, kunci, melihat tenant lain |
+| admin | mengubah batas, model, kunci, melihat semua tenant | **menyetujui konten atau balasan** |
+
+Peran ditegakkan di kode: `mira.setujui_konten` dan `percakapan.setujui` menolak peran admin, dan `peran.tenant_boleh` menolak sesi yang menyentuh tenant lain. Kode keluar 11 untuk akses ditolak.
 ## Laporan pekan
 
 ```bash

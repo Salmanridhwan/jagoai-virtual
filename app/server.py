@@ -56,6 +56,48 @@ class Kantor(BaseHTTPRequestHandler):
             return self._json({"tenant": self.tenant, "pekan": pekan, **data})
         if u.path in ("/papan", "/papan.html"):
             return self._berkas(WEB / "papan.html", "text/html; charset=utf-8")
+        if u.path in ("/data", "/data.html"):
+            return self._berkas(WEB / "data.html", "text/html; charset=utf-8")
+        if u.path in ("/kontrol", "/kontrol.html"):
+            return self._berkas(WEB / "kontrol.html", "text/html; charset=utf-8")
+        if u.path.startswith("/api/data/"):
+            from app import data as data_mod
+            q = urllib.parse.parse_qs(u.query)
+            nama = u.path.rsplit("/", 1)[-1]
+            pekan = (q.get("pekan") or [""])[0] or pekan_berjalan()
+            format_ = (q.get("format") or ["json"])[0]
+            if nama not in data_mod.TABEL:
+                return self._json({"error": "tabel tidak dikenal",
+                                   "pilihan": list(data_mod.TABEL)}, 404)
+            baris = data_mod.tabel(nama, ROOT, self.tenant, pekan)
+            if format_ == "csv":
+                import csv, io
+                buf = io.StringIO()
+                kolom = list(baris[0].keys()) if baris else ["kosong"]
+                w = csv.DictWriter(buf, fieldnames=kolom, extrasaction="ignore")
+                w.writeheader()
+                for b in baris:
+                    w.writerow(b)
+                isi = buf.getvalue().encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition",
+                                 'attachment; filename="%s-%s.csv"' % (nama, pekan))
+                self.send_header("Content-Length", str(len(isi)))
+                self.end_headers()
+                return self.wfile.write(isi)
+            return self._json({"tenant": self.tenant, "pekan": pekan, "tabel": nama,
+                               "baris": baris})
+        if u.path == "/api/cocokkan":
+            from app import data as data_mod
+            pekan = (urllib.parse.parse_qs(u.query).get("pekan") or [""])[0] or pekan_berjalan()
+            selisih = data_mod.cocokkan(ROOT, self.tenant, pekan)
+            return self._json({"tenant": self.tenant, "pekan": pekan,
+                               "selisih": selisih, "lulus": not selisih})
+        if u.path == "/api/kontrol":
+            from app import peran
+            pekan = (urllib.parse.parse_qs(u.query).get("pekan") or [""])[0] or pekan_berjalan()
+            return self._json({"pekan": pekan, "tenant": peran.ringkas_platform(ROOT, pekan)})
         return self._json({"error": "alamat tidak dikenal"}, 404)
 
     def log_message(self, *args):

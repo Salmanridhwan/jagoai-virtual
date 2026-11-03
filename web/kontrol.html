@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<title>Kontrol Platform | jagoai-virtual</title>
+<style>
+  :root { --bg:#0F1B2D; --panel:#16243A; --teks:#F5F7FA; --redup:#93A2B8; --aksen:#FFB020; --garis:#29405E; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:"Segoe UI", system-ui, sans-serif; background:var(--bg); color:var(--teks); }
+  header { display:flex; gap:12px; align-items:center; padding:18px 24px; border-bottom:1px solid var(--garis); flex-wrap:wrap; }
+  h1 { font-size:20px; margin:0; }
+  a { color:var(--aksen); }
+  main { padding:18px 24px 60px; }
+  .redup { color:var(--redup); font-size:13px; }
+  input[type=week] { background:var(--panel); border:1px solid var(--garis); color:var(--teks); padding:8px 10px; border-radius:8px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; margin-top:16px; }
+  th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--garis); }
+  th { color:var(--redup); }
+  td.angka { text-align:right; font-variant-numeric: tabular-nums; }
+  .kotak { border:1px solid var(--garis); background:var(--panel); border-radius:10px; padding:14px 16px; margin-top:18px; }
+  .larang { color:#FFA8A8; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Kontrol Platform</h1>
+  <span class="redup">layar admin, tidak boleh menyetujui isi</span>
+  <span style="margin-left:auto"><a href="/">Mode Kantor</a> · <a href="/data">Mode Data</a></span>
+</header>
+<main>
+  <label class="redup" for="pekan">Pekan </label>
+  <input type="week" id="pekan">
+  <div id="tabel" class="redup">memuat tenant</div>
+
+  <div class="kotak">
+    <strong>Batas peran admin</strong>
+    <p class="redup">Admin boleh mengubah batas, model, dan kunci, serta melihat semua tenant.
+    Admin <span class="larang">tidak boleh</span> menyetujui konten atau balasan. Persetujuan isi
+    hanya milik peran pengguna, karena yang menanggung akibat tayang adalah pemilik organisasi.</p>
+    <p class="redup">Peran ditegakkan di kode, bukan hanya disembunyikan di layar: fungsi
+    <code>mira.setujui_konten</code> dan <code>percakapan.setujui</code> menolak peran admin.</p>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+
+async function muat(pekan) {
+  const r = await fetch("/api/kontrol?pekan=" + pekan);
+  const d = await r.json();
+  const baris = d.tenant || [];
+  if (!baris.length) {
+    $("tabel").textContent = "Belum ada tenant dengan office.toml.";
+    return;
+  }
+  const html = ["<table><thead><tr><th>Tenant</th><th>Token</th><th>Naskah</th><th>Video</th><th>Selisih angka</th></tr></thead><tbody>"];
+  for (const t of baris) {
+    html.push("<tr><td>" + t.tenant + "</td>"
+      + '<td class="angka">' + t.token + "</td>"
+      + '<td class="angka">' + t.naskah + "</td>"
+      + '<td class="angka">' + t.video + "</td>"
+      + '<td class="angka">' + (t.galat < 0 ? "galat baca" : t.galat) + "</td></tr>");
+  }
+  html.push("</tbody></table>");
+  $("tabel").innerHTML = html.join("");
+}
+
+function pekanAwal() {
+  const d = new Date();
+  const geser = (d.getDay() + 6) % 7;
+  d.setDate(d.getDate() - geser);
+  const awal = new Date(d.getFullYear(), 0, 1);
+  const nomor = Math.ceil((((d - awal) / 86400000) + 1) / 7);
+  return d.toISOString().slice(0, 4) + "-W" + String(nomor).padStart(2, "0");
+}
+
+$("pekan").value = pekanAwal();
+$("pekan").addEventListener("change", () => muat($("pekan").value));
+muat($("pekan").value);
+</script>
+</body>
+</html>

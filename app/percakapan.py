@@ -221,7 +221,10 @@ def kerjakan(root, tenant, tanggal=None, kanal=("threads",), sekarang=None, kunc
     return hasil
 
 
-def setujui(root, tenant, id_kirim, oleh, sekarang=None):
+def setujui(root, tenant, id_kirim, oleh, sekarang=None, peran="pengguna"):
+    from app import peran as peran_mod
+
+    peran_mod.wajib(peran, "setujui_balasan")
     sekarang = sekarang or datetime.now().astimezone()
     folder = Path(root) / "tenant" / tenant / "keluaran" / "percakapan"
     for p in sorted(folder.glob("*.json")):

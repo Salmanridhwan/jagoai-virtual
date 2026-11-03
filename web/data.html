@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<title>Mode Data | jagoai-virtual</title>
+<style>
+  :root { --bg:#0F1B2D; --panel:#16243A; --teks:#F5F7FA; --redup:#93A2B8; --aksen:#FFB020; --garis:#29405E; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: "Segoe UI", system-ui, sans-serif; background:var(--bg); color:var(--teks); }
+  header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; padding:18px 24px; border-bottom:1px solid var(--garis); }
+  h1 { font-size:20px; margin:0; }
+  .redup { color:var(--redup); font-size:13px; }
+  a { color:var(--aksen); }
+  nav { display:flex; gap:8px; flex-wrap:wrap; padding:14px 24px; border-bottom:1px solid var(--garis); }
+  nav button { background:var(--panel); color:var(--teks); border:1px solid var(--garis); padding:8px 14px; border-radius:8px; cursor:pointer; font-size:14px; }
+  nav button[aria-pressed="true"] { border-color:var(--aksen); color:var(--aksen); }
+  main { padding:18px 24px 60px; }
+  .alat { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:14px; }
+  input[type=week], input[type=search] { background:var(--panel); border:1px solid var(--garis); color:var(--teks); padding:8px 10px; border-radius:8px; }
+  .tanda { padding:6px 12px; border-radius:8px; font-size:13px; border:1px solid var(--garis); }
+  .tanda.lulus { color:#8CE99A; border-color:#2F6B4A; }
+  .tanda.gagal { color:#FFA8A8; border-color:#7A3030; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--garis); vertical-align:top; }
+  th { color:var(--redup); font-weight:600; position:sticky; top:0; background:var(--bg); }
+  td.angka { text-align:right; font-variant-numeric: tabular-nums; }
+  .kosong { padding:26px; color:var(--redup); border:1px dashed var(--garis); border-radius:10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Mode Data</h1>
+  <span class="redup" id="konteks">memuat</span>
+  <span style="margin-left:auto"><a href="/">Mode Kantor</a> · <a href="/papan">Papan</a> · <a href="/kontrol">Kontrol</a></span>
+</header>
+<nav id="tab"></nav>
+<main>
+  <div class="alat">
+    <label class="redup" for="pekan">Pekan</label>
+    <input type="week" id="pekan">
+    <input type="search" id="saring" placeholder="saring isi tabel">
+    <span class="tanda" id="cocok">memeriksa angka</span>
+    <span id="ekspor" class="redup"></span>
+  </div>
+  <div id="isi" class="kosong">memuat tabel</div>
+</main>
+<script>
+const TABEL = ["ringkasan", "karyawan", "keluaran", "percakapan", "biaya"];
+const KOLOM_ANGKA = new Set(["naskah","desain_lulus","video","disetujui","antrean_masuk","token",
+  "shift","panggilan","ditolak","gagal","ditunda"]);
+let aktif = "ringkasan";
+let baris = [];
+
+const $ = (id) => document.getElementById(id);
+
+function pekanSekarang() {
+  const d = new Date();
+  const hari = (d.getDay() + 6) % 7;
+  d.setDate(d.getDate() - hari);
+  return d;
+}
+
+function nilaiPekan() {
+  const v = $("pekan").value;
+  if (!v) return null;
+  return v;
+}
+
+function gambarTab() {
+  $("tab").innerHTML = "";
+  for (const t of TABEL) {
+    const b = document.createElement("button");
+    b.textContent = t;
+    b.setAttribute("aria-pressed", String(t === aktif));
+    b.onclick = () => { aktif = t; gambarTab(); muat(); };
+    $("tab").appendChild(b);
+  }
+}
+
+function sel(nilai) {
+  if (nilai === null || nilai === undefined) return "";
+  if (typeof nilai === "object") return "";
+  const teks = String(nilai);
+  if (teks.startsWith("http")) {
+    const a = document.createElement("a");
+    a.href = teks; a.textContent = "tautan"; a.target = "_blank"; a.rel = "noreferrer";
+    return a.outerHTML;
+  }
+  return teks.length > 120 ? teks.slice(0, 120) + "…" : teks;
+}
+
+function gambarTabel() {
+  const kunci = $("saring").value.trim().toLowerCase();
+  const tampil = baris.filter((b) => !kunci ||
+    Object.values(b).some((v) => String(v ?? "").toLowerCase().includes(kunci)));
+  if (!tampil.length) {
+    $("isi").className = "kosong";
+    $("isi").textContent = "Tidak ada baris untuk pekan ini. Tabel kosong berarti belum ada berkas, bukan nol palsu.";
+    return;
+  }
+  $("isi").className = "";
+  const kolom = Object.keys(tampil[0]);
+  const html = ["<table><thead><tr>"];
+  for (const k of kolom) html.push("<th>" + k + "</th>");
+  html.push("</tr></thead><tbody>");
+  for (const b of tampil) {
+    html.push("<tr>");
+    for (const k of kolom) {
+      const kelas = KOLOM_ANGKA.has(k) ? ' class="angka"' : "";
+      html.push("<td" + kelas + ">" + sel(b[k]) + "</td>");
+    }
+    html.push("</tr>");
+  }
+  html.push("</tbody></table>");
+  $("isi").innerHTML = html.join("");
+}
+
+async function muat() {
+  const pekan = nilaiPekan();
+  if (!pekan) return;
+  const isoTanggal = pekan + "-01";
+  $("konteks").textContent = "tenant " + (window.TENANT || "jagoai") + " | pekan " + pekan;
+  const r = await fetch("/api/data/" + aktif + "?pekan=" + pekan);
+  const d = await r.json();
+  baris = d.baris || [];
+  gambarTabel();
+  $("ekspor").innerHTML = "";
+  for (const f of ["csv", "json"]) {
+    const a = document.createElement("a");
+    a.textContent = "unduh " + f;
+    a.href = "/api/data/" + aktif + "?pekan=" + pekan + (f === "csv" ? "&format=csv" : "&format=json");
+    a.style.marginRight = "12px";
+    $("ekspor").appendChild(a);
+  }
+  cekAngka(pekan);
+}
+
+async function cekAngka(pekan) {
+  const r = await fetch("/api/cocokkan?pekan=" + pekan);
+  const d = await r.json();
+  $("cocok").className = "tanda " + (d.lulus ? "lulus" : "gagal");
+  $("cocok").textContent = d.lulus
+    ? "angka sama dengan Vera, selisih nol"
+    : "selisih " + (d.selisih || []).length + " angka, ini cacat";
+}
+
+gambarTab();
+const awal = pekanSekarang();
+const iso = awal.toISOString().slice(0, 10);
+$("pekan").value = iso.slice(0, 4) + "-W" + String(Math.ceil((((awal - new Date(awal.getFullYear(), 0, 1)) / 86400000) + 1) / 7)).padStart(2, "0");
+$("pekan").addEventListener("change", muat);
+$("saring").addEventListener("input", gambarTabel);
+fetch("/api/health").then((r) => r.json()).then((d) => { window.TENANT = d.tenant; muat(); });
+</script>
+</body>
+</html>

@@ -88,7 +88,10 @@ def paket(root, tenant, tanggal):
             "menunggu_keputusan": len([s for s in siap if s["status"] != "sudah disetujui"])}
 
 
-def setujui_konten(root, tenant, tanggal, oleh, catatan="", sekarang=None):
+def setujui_konten(root, tenant, tanggal, oleh, catatan="", sekarang=None, peran="pengguna"):
+    from app import peran as peran_mod
+
+    peran_mod.wajib(peran, "setujui_konten")
     sekarang = sekarang or datetime.now().astimezone()
     tinjau = _tinjauan(root, tenant, tanggal)
     if tinjau is None:
