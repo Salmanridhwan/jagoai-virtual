@@ -68,6 +68,26 @@ python -m app.cli run --agent jagoai:nadia --tugas "tulis tiga varian hook untuk
 
 Keluaran: teks balasan, lalu `shift=... token=masuk+keluar`. Setiap shift menulis tiga event ke `tenant/jagoai/events.jsonl`: `shift_start`, `llm_call`, `shift_end`.
 
+## Desain feed
+
+```bash
+python -m app.cli desain --pekan 2026-11-09 --tanggal 2026-11-09 --format carousel
+```
+
+Membaca naskah Nadia, menggambar satu PNG per slide, lalu mengukur hasilnya dari piksel:
+
+| Aturan | Angka | Diukur dari |
+|---|---|---|
+| Margin aman | 64 piksel di kiri, kanan, atas | kotak batas piksel yang berbeda dari latar |
+| Zona bawah | 120 piksel kosong | jarak piksel terbawah ke tepi |
+| Kontras teks | 4,5:1 | rumus luminansi WCAG pada palet |
+| Ukuran huruf | judul 62, tubuh 44, kaki 30 piksel | ditetapkan saat menggambar |
+
+Keluaran: `tenant/jagoai/keluaran/desain/<tanggal>/slide-01.png` sampai slide terakhir, ditambah `laporan.json` berisi margin tiap slide, rasio kontras, dan `lulus` benar atau salah.
+
+Kode keluar 0 berarti lulus, 6 berarti ada pelanggaran. Laporan menyebut angka pelanggarannya, bukan hanya gagal.
+
+Catatan jujur: palet masih sementara, diambil dari `PALET` di `app/desain.py`, karena warna brand kit Canva belum bisa dibaca lewat MCP. Unggahan ke Canva menghasilkan aset PDF di pustaka, bukan desain yang bisa disunting per elemen.
 ## Papan kerja dan tugas berkas
 
 ```bash

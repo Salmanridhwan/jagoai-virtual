@@ -48,6 +48,13 @@ def _argumen(argv):
     t.add_argument("--format", dest="format_", default="carousel")
     t.add_argument("--kunci")
 
+    d = sub.add_parser("desain", help="gambar slide dari naskah dan periksa margin serta kontras")
+    d.add_argument("--tenant", default="jagoai")
+    d.add_argument("--pekan", required=True)
+    d.add_argument("--tanggal", required=True)
+    d.add_argument("--format", dest="format_", default="carousel")
+    d.add_argument("--footer", default="jagoai")
+
     return p.parse_args(argv)
 
 
@@ -107,6 +114,26 @@ def main(argv=None):
             print("penjadwal berjalan, tiap %d detik. Ctrl+C untuk berhenti." % a.jeda)
             penjadwal.putar(root, a.tenant, jeda=a.jeda)
             return 0
+
+        if a.perintah == "desain":
+            from app import desain
+            pola = sorted((root / "tenant" / a.tenant / "keluaran" / "naskah" / a.pekan)
+                          .glob(a.tanggal + "-*.md"))
+            if not pola:
+                print("naskah untuk %s belum ada di pekan %s" % (a.tanggal, a.pekan))
+                return 4
+            laporan = desain.buat(root, a.tenant, a.tanggal, pola[0],
+                                  format_=a.format_, footer=a.footer)
+            print("slide %d, kanvas %s, kontras %s" % (
+                len(laporan["slide"]), laporan["kanvas"], laporan["kontras"]))
+            for s in laporan["slide"]:
+                print("  slide %d %s %s" % (s["nomor"], Path(s["berkas"]).name,
+                                            "lulus" if not s["pelanggaran"] else "; ".join(s["pelanggaran"])))
+            if laporan["palet_salah"]:
+                for p in laporan["palet_salah"]:
+                    print("  palet: %s" % p)
+            print("laporan: %s" % (Path(laporan["slide"][0]["berkas"]).parent / "laporan.json"))
+            return 0 if laporan["lulus"] else 6
 
         if a.perintah == "tugas":
             if a.agent == "rian":
