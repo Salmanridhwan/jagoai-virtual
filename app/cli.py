@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from app import brief, config, env, gateway, models_registry, penjadwal, runtime
+from app import papan, tugas as tugas_mod
 
 
 def _argumen(argv):
@@ -36,6 +37,16 @@ def _argumen(argv):
     j.add_argument("--jeda", type=int, default=60, help="detik antar putaran")
     j.add_argument("--toleransi", type=int, default=180, help="menit sebelum slot dianggap terlewat")
     j.add_argument("--kunci")
+
+    t = sub.add_parser("tugas", help="kerjakan tugas yang menghasilkan berkas nyata")
+    t.add_argument("--tenant", default="jagoai")
+    t.add_argument("--agent", required=True, choices=["rian", "nadia"])
+    t.add_argument("--pekan", required=True, help="tanggal Senin, contoh 2026-11-09")
+    t.add_argument("--tanggal", help="untuk nadia, contoh 2026-11-10")
+    t.add_argument("--topik", help="untuk nadia")
+    t.add_argument("--kanal", default="instagram")
+    t.add_argument("--format", dest="format_", default="carousel")
+    t.add_argument("--kunci")
 
     return p.parse_args(argv)
 
@@ -97,6 +108,24 @@ def main(argv=None):
             penjadwal.putar(root, a.tenant, jeda=a.jeda)
             return 0
 
+        if a.perintah == "tugas":
+            if a.agent == "rian":
+                h = tugas_mod.rian(root, a.tenant, a.pekan, kunci=_kunci(cfg, a.tenant, a.kunci))
+                print("jadwal %d slot -> %s" % (len(h["slot"]), h["berkas"]))
+                for s in h["slot"]:
+                    print("  %s %-9s %-10s %s" % (s.get("tanggal"), s.get("kanal", ""),
+                                                   s.get("format", ""), s.get("topik", "")))
+            else:
+                if not a.tanggal or not a.topik:
+                    print("nadia butuh --tanggal dan --topik")
+                    return 2
+                h = tugas_mod.nadia(root, a.tenant, a.pekan, a.tanggal, a.topik,
+                                    kanal=a.kanal, format_=a.format_,
+                                    kunci=_kunci(cfg, a.tenant, a.kunci))
+                print("naskah -> %s" % h["berkas"])
+            print("token=%d" % h["tokens"])
+            return 0
+
         if a.perintah == "run":
             k = config.karyawan(cfg, a.agent)
             model = a.model or k.get("model") or ""
@@ -145,6 +174,9 @@ def main(argv=None):
     except runtime.ShiftDitunda as e:
         print("shift ditunda: %s" % e)
         return 8
+    except tugas_mod.TugasGagal as e:
+        print("tugas gagal: %s (%s)" % (e, "; ".join(e.kesalahan)))
+        return 9
 
     return 1
 

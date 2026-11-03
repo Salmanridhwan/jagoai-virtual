@@ -8,10 +8,11 @@ Menyajikan satu halaman dan dua alamat data:
 import argparse
 import json
 import urllib.parse
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from app import budget, config, events, state
+from app import budget, config, events, papan, state
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / "web"
@@ -19,7 +20,6 @@ WEB = ROOT / "web"
 
 class Kantor(BaseHTTPRequestHandler):
     tenant = "jagoai"
-
     def _json(self, data, kode=200):
         isi = json.dumps(data, ensure_ascii=False).encode()
         self.send_response(kode)
@@ -50,10 +50,22 @@ class Kantor(BaseHTTPRequestHandler):
                 return self._json(snapshot(self.tenant))
             except FileNotFoundError as e:
                 return self._json({"error": str(e)}, 404)
+        if u.path == "/api/papan":
+            pekan = (urllib.parse.parse_qs(u.query).get("pekan") or [""])[0] or pekan_berjalan()
+            data = papan.kolom(ROOT, self.tenant, pekan)
+            return self._json({"tenant": self.tenant, "pekan": pekan, **data})
+        if u.path in ("/papan", "/papan.html"):
+            return self._berkas(WEB / "papan.html", "text/html; charset=utf-8")
         return self._json({"error": "alamat tidak dikenal"}, 404)
 
     def log_message(self, *args):
         pass
+
+
+def pekan_berjalan(sekarang=None):
+    """Tanggal Senin pekan ini, bentuk YYYY-MM-DD."""
+    hari = (sekarang or datetime.now().astimezone()).date()
+    return (hari - timedelta(days=hari.weekday())).isoformat()
 
 
 def snapshot(tenant, sekarang=None):

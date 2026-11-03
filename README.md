@@ -68,6 +68,29 @@ python -m app.cli run --agent jagoai:nadia --tugas "tulis tiga varian hook untuk
 
 Keluaran: teks balasan, lalu `shift=... token=masuk+keluar`. Setiap shift menulis tiga event ke `tenant/jagoai/events.jsonl`: `shift_start`, `llm_call`, `shift_end`.
 
+## Papan kerja dan tugas berkas
+
+```bash
+python -m app.cli tugas --agent rian  --pekan 2026-11-09
+python -m app.cli tugas --agent nadia --pekan 2026-11-09 --tanggal 2026-11-09 --topik "..."
+python -m app.server --port 4500     # lalu buka http://127.0.0.1:4500/papan
+```
+
+| Berkas | Isi |
+|---|---|
+| `tenant/jagoai/keluaran/jadwal/<pekan>.json` | empat slot, tiap slot tanggal, kanal, format, topik, alasan |
+| `tenant/jagoai/keluaran/naskah/<pekan>/<tanggal>-<slug>.md` | naskah dengan kepala `status: draf` dan `disetujui_oleh` kosong |
+
+Aturan yang ditegakkan sebelum berkas ditulis:
+
+| Periksa | Kalau gagal |
+|---|---|
+| Balasan harus larik JSON yang sah | diulang sekali, lalu berhenti dengan kode 9 |
+| Minimal tiga slot, tanggal `YYYY-MM-DD`, tidak dobel, format dan kanal dikenal | diulang sekali dengan daftar kesalahan |
+| Lebih dari separuh topik harus menyentuh kata kunci bidang di `[merek]` | diulang sekali, supaya jadwal tidak keluar dari bidang produk |
+| Naskah wajib punya bagian Hook, Naskah, Caption, Catatan | diulang sekali dengan daftar bagian yang kurang |
+
+Tidak ada berkas setengah jadi. Kalau dua percobaan gagal, tidak ada yang ditulis dan pesan kesalahannya jelas.
 ## Penjadwal
 
 ```bash

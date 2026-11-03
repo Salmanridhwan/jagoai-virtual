@@ -4,3 +4,4 @@ __pycache__/
 tenant/*/.env
 tenant/*/events.jsonl
 tenant/*/state/
+tenant/*/keluaran/

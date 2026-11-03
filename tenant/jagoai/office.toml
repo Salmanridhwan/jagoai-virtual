@@ -4,6 +4,11 @@ nama = "JagoAI"
 paket = "dasar"
 mulai = 2026-11-02
 
+[merek]
+nama = "JagoAI"
+bidang = "kelas membangun website dan aplikasi tanpa coding untuk pemula Indonesia"
+kata_kunci = ["website", "web", "coding", "no-code", "nocode", "kelas", "kursus", "pemula", "aplikasi", "ai", "jagoai", "portofolio", "landing"]
+
 [gerbang]
 base_url = "https://9router.jagoai.dev/v1"
 kunci_env = "JAGOAI_ROUTER_KEY"
