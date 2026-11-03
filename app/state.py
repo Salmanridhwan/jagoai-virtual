@@ -6,6 +6,8 @@ Aturan yang dipegang:
 - blocked hanya lepas kalau ada event persetujuan, bukan oleh waktu
 - setelah sepuluh menit tanpa event, state turun ke ambient, dan ambient
   hanya boleh diam atau istirahat, tidak boleh terlihat bekerja
+- state menulis ditahan tiga puluh detik, bukan satu setengah detik, karena
+  pekerjaan yang hanya terlihat sekejap sama saja dengan tidak terlihat
 """
 from datetime import datetime
 
@@ -50,7 +52,7 @@ PRIORITAS = {
     "sleep": 0,
 }
 
-DURASI_MIN = {"error": 6, "ship": 5, "present": 3, "review": 4, "type": 1.5}
+DURASI_MIN = {"error": 6, "ship": 5, "present": 3, "review": 4, "type": 30}
 
 AMBIENT_DETIK = 90
 

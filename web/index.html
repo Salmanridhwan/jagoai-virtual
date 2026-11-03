@@ -17,6 +17,7 @@
            border-bottom:1px solid var(--line); flex-wrap:wrap; }
   header h1 { font-size:14px; margin:0; font-weight:600; letter-spacing:.3px; }
   header .meta { color:var(--redup); }
+  header a { color:#8fb3ff; text-decoration:none; }
   main { display:flex; gap:16px; padding:16px; align-items:flex-start; flex-wrap:wrap; }
   #kanvas { background:#0f1115; border:1px solid var(--line); border-radius:6px; display:block; }
   aside { flex:1; min-width:300px; display:flex; flex-direction:column; gap:8px; }
@@ -34,6 +35,16 @@
   .legenda { display:flex; gap:10px; flex-wrap:wrap; margin-top:8px; }
   .legenda span { display:inline-flex; align-items:center; gap:5px; }
   .kotak { width:9px; height:9px; border-radius:2px; display:inline-block; }
+  #pita { display:flex; gap:10px; align-items:center; padding:8px 16px;
+          border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  #pita button { background:var(--panel); color:var(--teks); border:1px solid var(--line);
+                 border-radius:5px; padding:4px 10px; cursor:pointer; font:inherit; font-size:12px; }
+  #pita button[aria-pressed="true"] { border-color:#4f7cff; color:#8fb3ff; }
+  #pita input[type=range] { width:260px; }
+  #pita select { background:var(--panel); color:var(--teks); border:1px solid var(--line);
+                 border-radius:5px; padding:4px 8px; font:inherit; font-size:12px; }
+  #jamRekam { color:#8fb3ff; min-width:46px; }
+  #kegiatan { color:var(--redup); }
 </style>
 </head>
 <body>
@@ -44,14 +55,27 @@
   <span class="meta" style="margin-left:auto"><a href="/papan">Papan</a> · <a href="/data">Mode Data</a> · <a href="/kontrol">Kontrol</a></span>
 </header>
 
+<div id="pita">
+  <button id="btnLangsung" aria-pressed="true">Langsung</button>
+  <button id="btnRekam" aria-pressed="false">Rekam</button>
+  <span id="alatRekam" style="display:none">
+    <select id="tanggalRekam"></select>
+    <input type="range" id="garis" min="0" max="0" value="0">
+    <button id="btnMain">putar</button>
+    <span id="jamRekam">-</span>
+    <span id="kegiatan"></span>
+  </span>
+</div>
+
 <main>
   <canvas id="kanvas" width="880" height="572"></canvas>
   <aside id="daftar"></aside>
 </main>
 
 <footer>
-  Seni sementara: kotak warna, bukan sprite. Setiap warna berasal dari event di
-  events.jsonl, dan setiap kartu bisa dibuka untuk melihat lima event terakhir.
+  Sprite digambar dari matriks piksel di halaman ini, bukan berkas gambar, jadi kantor
+  tetap terbuka tanpa jaringan. Warna baju mengikuti state terakhir dari events.jsonl.
+  Tema ruangan mengikuti jam: pagi, siang, sore, malam.
   <div class="legenda" id="legenda"></div>
 </footer>
 
@@ -66,6 +90,8 @@ const WARNA = {
   coffee:'#b58a5f', idle:'#4a5260', sleep:'#20242c'
 };
 
+const RAMBUT = ['#3b2a20','#6b4423','#2b2b33','#7d5a3c','#1f1f26','#5a3a2a'];
+
 // meja mengikuti Peta Kantor: nomor meja -> [kolom, baris]
 const MEJA = {
   1:[9,3], 2:[9,4], 3:[9,5], 4:[9,6], 5:[9,7],
@@ -75,43 +101,147 @@ const MEJA = {
 // ruang bernama, untuk karyawan yang tidak duduk di meja bernomor
 const RUANG = { brief:[4,4], sunting:[33,5], studio:[33,10], pantri:[4,18], arsip:[33,21] };
 
+const ZONA = [
+  {x:2,  y:2,  w:7, h:5,  label:'ruang brief'},
+  {x:30, y:2,  w:8, h:6,  label:'ruang sunting'},
+  {x:30, y:9,  w:8, h:5,  label:'pojok studio'},
+  {x:2,  y:16, w:6, h:5,  label:'pantri'},
+  {x:31, y:19, w:8, h:5,  label:'arsip'},
+  {x:18, y:10, w:5, h:3,  label:'papan jadwal'},
+  {x:18, y:16, w:5, h:3,  label:'papan percakapan'}
+];
+
+const TEMA = {
+  pagi:  { nama:'pagi',  latar:'#141821', dinding:'#1b2029', garis:'#1d2430', lampu:'rgba(255,214,160,0.10)' },
+  siang: { nama:'siang', latar:'#14161a', dinding:'#1e2430', garis:'#191d24', lampu:'rgba(255,240,200,0.04)' },
+  sore:  { nama:'sore',  latar:'#1a1713', dinding:'#241f19', garis:'#221d17', lampu:'rgba(255,170,90,0.14)' },
+  malam: { nama:'malam', latar:'#0e1014', dinding:'#171a20', garis:'#141619', lampu:'rgba(255,214,160,0.20)' }
+};
+
+// matriks sprite 12 x 15: '.' kosong, h rambut, s kulit, b baju, p celana, o sepatu
+const SPRITE = [
+  '....hhhh....',
+  '...hhhhhh...',
+  '...hssssh...',
+  '...hssssh...',
+  '....ssss....',
+  '....ssss....',
+  '..bbbbbbbb..',
+  '.bbbbbbbbbb.',
+  '.bbbbbbbbbb.',
+  '.sbbbbbbbbs.',
+  '..bbbbbbbb..',
+  '..pppppppp..',
+  '..pp....pp..',
+  '..pp....pp..',
+  '..oo....oo..'
+];
+
+const IKON = {
+  coffee:  ['..c..', '.ccc.', '..c..', '.....'],
+  error:   ['.rrr.', '.r.r.', '.rrr.', '.....'],
+  blocked: ['.ooo.', '.o.o.', '.ooo.', '.....'],
+  review:  ['..m..', '.mmm.', '..m..', '.....'],
+  type:    ['.kkk.', '.k.k.', '.kkk.', '.....'],
+  ship:    ['.yyy.', '..y..', '.yyy.', '.....'],
+  sleep:   ['..z..', '.zz..', '..z..', '.....']
+};
+
+let data = null;
+let dipilih = null;
+let mode = 'langsung';
+let rekaman = null;
+let bingkaiAktif = 0;
+let pemutar = null;
+
+function jamTema(jam) {
+  if (jam >= 5 && jam < 10) return TEMA.pagi;
+  if (jam >= 10 && jam < 16) return TEMA.siang;
+  if (jam >= 16 && jam < 19) return TEMA.sore;
+  return TEMA.malam;
+}
+
+function temaSekarang() {
+  if (mode === 'rekam' && rekaman && rekaman.bingkai.length) {
+    const iso = rekaman.bingkai[bingkaiAktif].iso;
+    return jamTema(parseInt(iso.slice(11, 13), 10));
+  }
+  return jamTema(new Date().getHours());
+}
+
 function posisiMeja(teks) {
   const t = teks || '';
   const m = /^tetap:(\d+)$/.exec(t);
-  if (m) {
-    const n = parseInt(m[1], 10);
-    if (MEJA[n]) return MEJA[n];
-  }
+  if (m && MEJA[parseInt(m[1], 10)]) return MEJA[parseInt(m[1], 10)];
   const r = /^ruang:([a-z]+)$/.exec(t);
   if (r && RUANG[r[1]]) return RUANG[r[1]];
   return [20, 13];
 }
 
-const ZONA = [
-  {x:2,  y:2,  w:7, h:5,  warna:'#1e2430', label:'ruang brief'},
-  {x:30, y:2,  w:8, h:6,  warna:'#1e2430', label:'ruang sunting'},
-  {x:30, y:9,  w:8, h:5,  warna:'#1e2430', label:'pojok studio'},
-  {x:2,  y:16, w:6, h:5,  warna:'#1e2430', label:'pantri'},
-  {x:31, y:19, w:8, h:5,  warna:'#1e2430', label:'arsip'},
-  {x:18, y:10, w:5, h:3,  warna:'#232a37', label:'papan jadwal'},
-  {x:18, y:16, w:5, h:3,  warna:'#232a37', label:'papan percakapan'}
-];
+function warnaRambut(nama) {
+  let n = 0;
+  for (const c of nama) n = (n + c.charCodeAt(0)) % 997;
+  return RAMBUT[n % RAMBUT.length];
+}
 
-let data = null;
-let dipilih = null;
+function gambarSprite(px, py, nama, state) {
+  const skala = 1.5;
+  const baju = WARNA[state] || '#888';
+  const tidur = state === 'sleep';
+  for (let y = 0; y < SPRITE.length; y++) {
+    const baris = SPRITE[y];
+    for (let x = 0; x < baris.length; x++) {
+      const c = baris[x];
+      if (c === '.') continue;
+      let w = null;
+      if (c === 'h') w = tidur ? '#2a2a31' : warnaRambut(nama);
+      else if (c === 's') w = tidur ? '#6d6a66' : '#d8b48c';
+      else if (c === 'b') w = tidur ? '#333a44' : baju;
+      else if (c === 'p') w = '#2b303a';
+      else if (c === 'o') w = '#1b1f26';
+      if (!w) continue;
+      ctx.fillStyle = w;
+      ctx.fillRect(px + x * skala, py + y * skala, skala, skala);
+    }
+  }
+  const ikon = IKON[state];
+  if (ikon) {
+    ctx.fillStyle = state === 'sleep' ? '#5a6472' : (WARNA[state] || '#cfd6e2');
+    for (let y = 0; y < ikon.length; y++) {
+      for (let x = 0; x < ikon[y].length; x++) {
+        if (ikon[y][x] !== '.') ctx.fillRect(px + 14 + x * 2, py - 8 + y * 2, 2, 2);
+      }
+    }
+  }
+}
 
-function nomorMeja(teks) {
-  const m = /^tetap:(\d+)$/.exec(teks || '');
-  return m ? parseInt(m[1], 10) : null;
+function gambarMeja(px, py) {
+  ctx.fillStyle = '#2b303a';
+  ctx.fillRect(px - 4, py + 6, 22, 10);
+  ctx.fillStyle = '#39404d';
+  ctx.fillRect(px - 2, py + 4, 18, 3);
+  ctx.fillStyle = '#4f7cff';
+  ctx.fillRect(px + 1, py - 2, 9, 6);
+  ctx.fillStyle = '#243049';
+  ctx.fillRect(px + 2, py - 1, 7, 4);
+}
+
+function keadaanKaryawan() {
+  if (mode === 'rekam' && rekaman && rekaman.bingkai.length) {
+    return rekaman.bingkai[bingkaiAktif].karyawan;
+  }
+  const hasil = {};
+  (data ? data.karyawan : []).forEach(k => { hasil[k.nama.toLowerCase()] = k.state; });
+  return hasil;
 }
 
 function gambar() {
+  const tema = temaSekarang();
   ctx.clearRect(0, 0, KANVAS.width, KANVAS.height);
-
-  // lantai
-  ctx.fillStyle = '#0f1115';
+  ctx.fillStyle = tema.latar;
   ctx.fillRect(0, 0, KANVAS.width, KANVAS.height);
-  ctx.strokeStyle = '#191d24';
+
+  ctx.strokeStyle = tema.garis;
   ctx.lineWidth = 1;
   for (let x = 0; x <= 40; x++) {
     ctx.beginPath(); ctx.moveTo(x*TILE, 0); ctx.lineTo(x*TILE, 26*TILE); ctx.stroke();
@@ -120,42 +250,43 @@ function gambar() {
     ctx.beginPath(); ctx.moveTo(0, y*TILE); ctx.lineTo(40*TILE, y*TILE); ctx.stroke();
   }
 
-  // zona
   ZONA.forEach(z => {
-    ctx.fillStyle = z.warna;
+    ctx.fillStyle = tema.dinding;
     ctx.fillRect(z.x*TILE, z.y*TILE, z.w*TILE, z.h*TILE);
     ctx.fillStyle = '#5a6472';
     ctx.font = '10px ui-monospace, monospace';
     ctx.fillText(z.label, z.x*TILE + 6, z.y*TILE + 14);
   });
 
-  if (!data) return;
+  if (tema.nama === 'malam' || tema.nama === 'sore') {
+    ctx.fillStyle = tema.lampu;
+    ctx.beginPath(); ctx.arc(10*TILE, 8*TILE, 120, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(26*TILE, 18*TILE, 110, 0, Math.PI*2); ctx.fill();
+  }
 
-  data.karyawan.forEach(k => {
+  const keadaan = keadaanKaryawan();
+  const daftar = data ? data.karyawan : [];
+  daftar.forEach(k => {
     const pos = posisiMeja(k.meja);
     const px = pos[0]*TILE, py = pos[1]*TILE;
-
-    // meja
-    ctx.fillStyle = '#2b303a';
-    ctx.fillRect(px - 4, py + 6, 20, 10);
-
-    // karakter
-    const warna = WARNA[k.state] || '#888';
-    ctx.fillStyle = warna;
-    ctx.fillRect(px + 1, py - 6, 12, 12);
+    const state = keadaan[k.nama.toLowerCase()] || k.state;
+    gambarMeja(px, py);
+    gambarSprite(px + 3, py - 24, k.nama, state);
     if (dipilih === k.agent_id) {
       ctx.strokeStyle = '#4f7cff';
       ctx.lineWidth = 2;
-      ctx.strokeRect(px - 2, py - 9, 18, 18);
+      ctx.strokeRect(px - 2, py - 28, 26, 40);
     }
-
-    // nama dan state, ditaruh di samping kanan supaya tidak bertumpuk
     ctx.font = '10px ui-monospace, monospace';
     ctx.fillStyle = '#cfd6e2';
     ctx.fillText(k.nama, px + 20, py + 4);
-    ctx.fillStyle = warna;
-    ctx.fillText(k.state, px + 20, py + 16);
+    ctx.fillStyle = WARNA[state] || '#888';
+    ctx.fillText(state, px + 20, py + 16);
   });
+
+  ctx.fillStyle = '#5a6472';
+  ctx.font = '10px ui-monospace, monospace';
+  ctx.fillText('tema ' + tema.nama, 10, KANVAS.height - 10);
 }
 
 function kartu(k) {
@@ -203,6 +334,7 @@ function render() {
 }
 
 async function segarkan() {
+  if (mode === 'rekam') return;
   try {
     const r = await fetch('/api/state', { cache: 'no-store' });
     if (!r.ok) throw new Error('status ' + r.status);
@@ -212,6 +344,80 @@ async function segarkan() {
     document.getElementById('info').textContent = 'gagal membaca keadaan: ' + e.message;
   }
 }
+
+async function muatTanggal() {
+  const r = await fetch('/api/rekam/tanggal', { cache: 'no-store' });
+  const d = await r.json();
+  const pilih = document.getElementById('tanggalRekam');
+  pilih.innerHTML = '';
+  (d.tanggal || []).forEach(t => {
+    const o = document.createElement('option');
+    o.value = t; o.textContent = t;
+    pilih.appendChild(o);
+  });
+  return (d.tanggal || [])[0] || null;
+}
+
+async function muatRekaman(tanggal) {
+  if (!tanggal) {
+    document.getElementById('jamRekam').textContent = 'belum ada event';
+    document.getElementById('kegiatan').textContent = '';
+    return;
+  }
+  const r = await fetch('/api/rekam?mode=peristiwa&tanggal=' + tanggal, { cache: 'no-store' });
+  rekaman = await r.json();
+  const garis = document.getElementById('garis');
+  garis.max = Math.max(0, rekaman.bingkai.length - 1);
+  garis.value = 0;
+  bingkaiAktif = 0;
+  tampilBingkai();
+}
+
+function tampilBingkai() {
+  if (!rekaman || !rekaman.bingkai.length) { gambar(); return; }
+  const b = rekaman.bingkai[bingkaiAktif];
+  document.getElementById('jamRekam').textContent = b.jam;
+  document.getElementById('kegiatan').textContent = b.kegiatan.length
+    ? b.kegiatan.map(k => k.agent + ':' + k.kind).join(' · ')
+    : 'tidak ada event pada jendela ini';
+  gambar();
+}
+
+function hentikan() {
+  if (pemutar) { clearInterval(pemutar); pemutar = null; }
+  document.getElementById('btnMain').textContent = 'putar';
+}
+
+function aturMode(baru) {
+  mode = baru;
+  document.getElementById('btnLangsung').setAttribute('aria-pressed', String(mode === 'langsung'));
+  document.getElementById('btnRekam').setAttribute('aria-pressed', String(mode === 'rekam'));
+  document.getElementById('alatRekam').style.display = mode === 'rekam' ? 'inline' : 'none';
+  hentikan();
+  if (mode === 'rekam') {
+    muatTanggal().then(muatRekaman);
+  } else {
+    segarkan();
+  }
+}
+
+document.getElementById('btnLangsung').onclick = () => aturMode('langsung');
+document.getElementById('btnRekam').onclick = () => aturMode('rekam');
+document.getElementById('garis').oninput = (e) => {
+  bingkaiAktif = parseInt(e.target.value, 10);
+  tampilBingkai();
+};
+document.getElementById('tanggalRekam').onchange = (e) => muatRekaman(e.target.value);
+document.getElementById('btnMain').onclick = () => {
+  if (pemutar) { hentikan(); return; }
+  document.getElementById('btnMain').textContent = 'jeda';
+  pemutar = setInterval(() => {
+    if (!rekaman || !rekaman.bingkai.length) return;
+    bingkaiAktif = (bingkaiAktif + 1) % rekaman.bingkai.length;
+    document.getElementById('garis').value = bingkaiAktif;
+    tampilBingkai();
+  }, 350);
+};
 
 legenda();
 segarkan();

@@ -104,6 +104,13 @@ def _argumen(argv):
     kt.add_argument("--pekan", required=True)
     kt.add_argument("--peran", default="admin", choices=("pengguna", "admin"))
 
+    rk = sub.add_parser("rekam", help="putar ulang kantor dari events.jsonl")
+    rk.add_argument("--tenant", default="jagoai")
+    rk.add_argument("--tanggal")
+    rk.add_argument("--langkah", type=int, default=10)
+    rk.add_argument("--bingkai", type=int, default=6, help="berapa bingkai dicetak")
+    rk.add_argument("--mode", default="peristiwa", choices=("peristiwa", "jam"))
+
     return p.parse_args(argv)
 
 
@@ -163,6 +170,21 @@ def main(argv=None):
                 return 0
             print("penjadwal berjalan, tiap %d detik. Ctrl+C untuk berhenti." % a.jeda)
             penjadwal.putar(root, a.tenant, jeda=a.jeda)
+            return 0
+
+        if a.perintah == "rekam":
+            from app import rekam
+            tanggal = a.tanggal or (rekam.daftar_tanggal(root, a.tenant) or [""])[-1]
+            d = rekam.bingkai(root, a.tenant, tanggal, a.langkah, mode=a.mode)
+            if d["kosong"]:
+                print("tidak ada event pada %s" % tanggal)
+                return 4
+            print("%s | %d event | %d bingkai | mode %s | token %d" % (
+                tanggal, d["jumlah_event"], len(d["bingkai"]), d["mode"],
+                rekam.token_hari(root, a.tenant, tanggal)))
+            for b in d["bingkai"][:a.bingkai]:
+                ringkas = " ".join("%s=%s" % (n, s) for n, s in b["karyawan"].items() if s != "sleep")
+                print("  %s %s" % (b["jam"], ringkas or "semua tidur"))
             return 0
 
         if a.perintah == "data":

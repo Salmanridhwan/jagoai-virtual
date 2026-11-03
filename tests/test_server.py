@@ -81,6 +81,18 @@ class TestServer(unittest.TestCase):
         d = json.loads(badan)
         self.assertTrue(d["lulus"], d["selisih"])
 
+    def test_rekam_dan_daftar_tanggal(self):
+        kode, badan = self._get("/api/rekam/tanggal")
+        self.assertEqual(kode, 200)
+        tanggal = json.loads(badan)["tanggal"]
+        self.assertTrue(tanggal)
+        kode, badan = self._get("/api/rekam?tanggal=%s&langkah=30" % tanggal[0])
+        self.assertEqual(kode, 200)
+        d = json.loads(badan)
+        self.assertFalse(d["kosong"])
+        self.assertGreater(len(d["bingkai"]), 0)
+        self.assertIn("nadia", d["bingkai"][0]["karyawan"])
+
     def test_kontrol(self):
         kode, badan = self._get("/api/kontrol?pekan=%s" % _pekan())
         self.assertEqual(kode, 200)

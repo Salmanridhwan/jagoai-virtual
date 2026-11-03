@@ -94,6 +94,23 @@ class Kantor(BaseHTTPRequestHandler):
             selisih = data_mod.cocokkan(ROOT, self.tenant, pekan)
             return self._json({"tenant": self.tenant, "pekan": pekan,
                                "selisih": selisih, "lulus": not selisih})
+        if u.path == "/api/rekam":
+            from app import rekam
+            q = urllib.parse.parse_qs(u.query)
+            tanggal = (q.get("tanggal") or [""])[0] or events.now_iso()[:10]
+            try:
+                langkah = int((q.get("langkah") or ["10"])[0])
+            except ValueError:
+                langkah = 10
+            mode = (q.get("mode") or ["peristiwa"])[0]
+            if mode not in ("jam", "peristiwa"):
+                mode = "peristiwa"
+            return self._json(rekam.bingkai(ROOT, self.tenant, tanggal, max(1, langkah),
+                                            mode=mode))
+        if u.path == "/api/rekam/tanggal":
+            from app import rekam
+            return self._json({"tenant": self.tenant,
+                               "tanggal": rekam.daftar_tanggal(ROOT, self.tenant)})
         if u.path == "/api/kontrol":
             from app import peran
             pekan = (urllib.parse.parse_qs(u.query).get("pekan") or [""])[0] or pekan_berjalan()

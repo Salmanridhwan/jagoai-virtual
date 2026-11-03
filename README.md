@@ -68,6 +68,28 @@ python -m app.cli run --agent jagoai:nadia --tugas "tulis tiga varian hook untuk
 
 Keluaran: teks balasan, lalu `shift=... token=masuk+keluar`. Setiap shift menulis tiga event ke `tenant/jagoai/events.jsonl`: `shift_start`, `llm_call`, `shift_end`.
 
+## Pixel, tema waktu, dan rekam
+
+```bash
+python -m app.cli rekam --tanggal 2026-11-03                 # mode peristiwa, satu bingkai per event
+python -m app.cli rekam --tanggal 2026-11-03 --mode jam --langkah 10
+```
+
+| Bagian | Isi |
+|---|---|
+| Sprite | matriks piksel 12x15 di `web/index.html`, digambar dengan `fillRect`, tanpa berkas gambar |
+| Warna baju | mengikuti state terakhir, jadi state tetap terbaca dari jauh |
+| Rambut | beda per nama, dihitung dari huruf nama, bukan diacak |
+| Ikon | kopi, galat, terkunci, kaca pembesar, papan ketik, paket, tidur |
+| Tema | pagi 05-10, siang 10-16, sore 16-19, malam 19-05, dengan cahaya lampu di sore dan malam |
+| Rekam | tombol Rekam di halaman, atau `/api/rekam?tanggal=&mode=` |
+
+Dua mode rekam:
+
+- `peristiwa` satu bingkai per event, dipakai halaman. Rekaman mengikuti pekerjaan, bukan jam dinding.
+- `jam` satu bingkai tiap N menit, berguna untuk melihat jam yang benar benar sepi.
+
+Bingkai dihitung dengan `state.ringkas` yang sama dengan kanvas langsung, jadi rekaman tidak bisa menampilkan keadaan yang tidak pernah terjadi. Hari tanpa event ditolak dengan kode keluar 4, bukan diputar sebagai kantor kosong yang terlihat sibuk.
 ## Mode data dan kontrol admin
 
 ```bash
