@@ -77,6 +77,17 @@ def _argumen(argv):
     k.add_argument("--oleh", default="pemilik")
     k.add_argument("--kunci")
 
+    mp = sub.add_parser("mira", help="paket persetujuan dan catatan keputusan pemilik")
+    mp.add_argument("--tenant", default="jagoai")
+    mp.add_argument("--tanggal", required=True)
+    mp.add_argument("--setujui", action="store_true", help="tandai konten disetujui")
+    mp.add_argument("--oleh", default="")
+    mp.add_argument("--catatan", default="")
+
+    an = sub.add_parser("antrean", help="Kiki menyusun antrean unggah dari yang disetujui")
+    an.add_argument("--tenant", default="jagoai")
+    an.add_argument("--tanggal", required=True)
+
     return p.parse_args(argv)
 
 
@@ -135,6 +146,37 @@ def main(argv=None):
                 return 0
             print("penjadwal berjalan, tiap %d detik. Ctrl+C untuk berhenti." % a.jeda)
             penjadwal.putar(root, a.tenant, jeda=a.jeda)
+            return 0
+
+        if a.perintah == "mira":
+            from app import mira
+            if a.setujui:
+                data = mira.setujui_konten(root, a.tenant, a.tanggal, a.oleh, a.catatan)
+                print("disetujui oleh %s pada %s" % (data["oleh"], data["pada"]))
+                return 0
+            paket = mira.paket(root, a.tenant, a.tanggal)
+            print("menunggu keputusan: %d | tertahan: %d" % (paket["menunggu_keputusan"],
+                                                             len(paket["tertahan"])))
+            for s in paket["siap"]:
+                keterangan = s.get("akun") or s.get("berkas", "")
+                print("  siap   %-8s %-22s %s" % (s["jenis"], s["status"], keterangan))
+            for t in paket["tertahan"]:
+                print("  tahan  %-8s %s" % (t["jenis"], t["alasan"]))
+                for temuan in t.get("temuan", []):
+                    print("         - %s" % temuan)
+            return 0
+
+        if a.perintah == "antrean":
+            from app import antrean
+            h = antrean.susun(root, a.tenant, a.tanggal)
+            print("masuk %d | ditolak %d | siap unggah manual %d" % (
+                h["jumlah"]["masuk"], h["jumlah"]["ditolak"], h["jumlah"]["manual"]))
+            for m in h["masuk"]:
+                print("  masuk  %-8s %-20s %s" % (m["jenis"], m["status"],
+                                                  m.get("akun") or m.get("berkas", "")))
+            for d in h["ditolak"]:
+                print("  tolak  %-8s %s" % (d["jenis"], d["alasan"]))
+            print("berkas: %s" % h["berkas"])
             return 0
 
         if a.perintah == "percakapan":

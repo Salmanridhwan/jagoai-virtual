@@ -68,6 +68,25 @@ python -m app.cli run --agent jagoai:nadia --tugas "tulis tiga varian hook untuk
 
 Keluaran: teks balasan, lalu `shift=... token=masuk+keluar`. Setiap shift menulis tiga event ke `tenant/jagoai/events.jsonl`: `shift_start`, `llm_call`, `shift_end`.
 
+## Persetujuan dan antrean unggah
+
+```bash
+python -m app.cli mira    --tanggal 2026-11-09                    # apa yang menunggu dan apa yang tertahan
+python -m app.cli mira    --tanggal 2026-11-09 --setujui --oleh salman
+python -m app.cli antrean --tanggal 2026-11-09
+```
+
+| Aturan | Siapa yang menegakkan |
+|---|---|
+| Mira tidak menyetujui apa pun, hanya menyiapkan paket | `app/mira.py` |
+| Konten berstatus tolak atau manual tidak bisa disetujui | `mira.setujui_konten` menolak dengan `ValueError` |
+| Persetujuan wajib menyebut nama | `oleh` kosong ditolak |
+| Antrean hanya menerima yang sudah disetujui | `app/antrean.py` |
+| Tinjauan tolak tidak masuk antrean walau ada berkas persetujuan | diperiksa ulang di antrean |
+| Batas 20 balasan sehari | dihitung di antrean |
+| Tanpa token kanal, status `siap_unggah_manual` | bukan disembunyikan |
+
+Persetujuan disimpan di `tenant/jagoai/keluaran/persetujuan/<tanggal>.json`, antrean di `keluaran/antrean/<tanggal>.json`.
 ## Jalur percakapan
 
 ```bash
