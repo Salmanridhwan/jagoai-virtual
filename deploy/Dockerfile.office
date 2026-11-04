@@ -1,0 +1,13 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    TZ=Asia/Jakarta
+
+COPY app ./app
+COPY web ./web
+COPY tenant ./tenant
+
+EXPOSE 4500
+CMD ["python", "-m", "app.server", "--host", "0.0.0.0", "--port", "4500"]

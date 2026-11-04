@@ -18,6 +18,15 @@ ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / "web"
 
 
+def studio_url(tenant):
+    """Alamat Studio yang dilihat manusia, dari office.toml bagian [openpost]."""
+    try:
+        cfg = config.load(tenant, root=str(ROOT))
+    except FileNotFoundError:
+        return ""
+    return str((cfg.get("openpost") or {}).get("studio_url") or "")
+
+
 class Kantor(BaseHTTPRequestHandler):
     tenant = "jagoai"
     def _json(self, data, kode=200):
@@ -58,6 +67,17 @@ class Kantor(BaseHTTPRequestHandler):
             return self._berkas(WEB / "papan.html", "text/html; charset=utf-8")
         if u.path in ("/data", "/data.html"):
             return self._berkas(WEB / "data.html", "text/html; charset=utf-8")
+        if u.path in ("/studio", "/studio/"):
+            tujuan = studio_url(self.tenant)
+            if not tujuan:
+                return self._json({"error": "studio_url belum diisi di office.toml bagian [openpost]"}, 404)
+            self.send_response(302)
+            self.send_header("Location", tujuan)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if u.path in ("/tenants", "/tenants.html"):
+            return self._berkas(WEB / "tenants.html", "text/html; charset=utf-8")
         if u.path in ("/kontrol", "/kontrol.html"):
             return self._berkas(WEB / "kontrol.html", "text/html; charset=utf-8")
         if u.path.startswith("/api/data/"):
@@ -112,9 +132,15 @@ class Kantor(BaseHTTPRequestHandler):
             return self._json({"tenant": self.tenant,
                                "tanggal": rekam.daftar_tanggal(ROOT, self.tenant)})
         if u.path == "/api/kontrol":
-            from app import peran
+            from app import openpost, peran
             pekan = (urllib.parse.parse_qs(u.query).get("pekan") or [""])[0] or pekan_berjalan()
-            return self._json({"pekan": pekan, "tenant": peran.ringkas_platform(ROOT, pekan)})
+            baris = peran.ringkas_platform(ROOT, pekan)
+            for b in baris:
+                try:
+                    b["studio"] = openpost.ringkas_tenant(ROOT, b["tenant"])
+                except Exception as e:  # layar admin tidak boleh mati karena satu tenant
+                    b["studio"] = {"siap": False, "galat": str(e)[:160]}
+            return self._json({"pekan": pekan, "tenant": baris})
         return self._json({"error": "alamat tidak dikenal"}, 404)
 
     def log_message(self, *args):

@@ -68,6 +68,26 @@ python -m app.cli run --agent jagoai:nadia --tugas "tulis tiga varian hook untuk
 
 Keluaran: teks balasan, lalu `shift=... token=masuk+keluar`. Setiap shift menulis tiga event ke `tenant/jagoai/events.jsonl`: `shift_start`, `llm_call`, `shift_end`.
 
+## Kirim ke kanal
+
+```bash
+python -m app.cli kirim --tanggal 2026-11-03 --jenis balasan --id sampel-1 --oleh salman
+python -m app.cli kirim --tanggal 2026-11-09 --jenis konten  --id 2026-11-09 --oleh salman
+```
+
+Satu perintah, tiga pagar berlapis. Semua harus lolos sebelum satu permintaan keluar:
+
+| Pagar | Yang diperiksa | Kalau gagal |
+|---|---|---|
+| Antrean | barang ada di `keluaran/antrean/<tanggal>.json` dengan status `siap_unggah` | ditolak, kode 12 |
+| Persetujuan | ada nama penyetuju. Konten lewat `keluaran/persetujuan/`, balasan lewat `disetujui_oleh` | ditolak, kode 12 |
+| Peran | hanya peran pengguna, admin tidak boleh | ditolak, kode 11 |
+| Batas | 20 kiriman sehari, jeda 3 menit antar kiriman | ditolak, kode 12 |
+| Token | `JAGOAI_<KANAL>_TOKEN` harus ada | ditolak, kode 12, dicatat tertahan |
+
+Setiap percobaan dicatat di `tenant/jagoai/keluaran/kirim/<tanggal>.json` dengan status `tertahan`, `gagal`, atau `terkirim`, beserta nama penyetuju dan nama pengirim. Event `published` hanya ditulis kalau kanal benar-benar membalas berhasil.
+
+Selama token kanal belum ada, semua kiriman berhenti dengan pesan jelas. Tidak ada yang berpura-pura terkirim.
 ## Pixel, tema waktu, dan rekam
 
 ```bash
@@ -295,6 +315,81 @@ Empat yang pertama menghentikan dan memicu satu kali perbaikan. `topik` hanya pe
 Kalau melanggar, shift mencoba sekali lagi dengan pesan perbaikan. Kalau masih melanggar, hasil dicatat apa adanya dengan catatan `keluaran_ditolak`, tidak dibuang dan tidak disembunyikan.
 
 Penjaga ini bukan penilai mutu. Omar tetap penentu lulus atau tolak.
+
+## Jembatan OpenPost
+
+OpenPost dipakai sebagai lapisan pengiriman, bukan pengambil keputusan. Gerbang persetujuan tetap di `app/kirim.py`; modul `app/openpost.py` hanya mengantar barang yang sudah lolos ke sana.
+
+```bash
+python -m app.cli openpost --cek
+python -m app.cli openpost --tanggal 2026-11-04 --jenis balasan --id sampel-1 --oleh salman
+```
+
+| Langkah | Panggilan |
+|---|---|
+| 1 | `POST /api/v1/publications` membuat draf, belum tayang |
+| 2 | `POST /api/v1/publications/{id}/validate` memeriksa rendisi |
+| 3 | `POST /api/v1/publications/{id}/publish-now` dengan `expected_revision` |
+| 4 | `GET /api/v1/publications/{id}` sampai rendisi final |
+
+Aturan yang dipegang modul ini:
+
+- Alamat dan nama tinggal di `office.toml` bagian `[openpost]`, token hanya di `.env` sebagai `JAGOAI_OPENPOST_TOKEN`.
+- `published` hanya ditulis kalau rendisi OpenPost benar benar berstatus `published`. Status yang belum final dilaporkan gagal dengan alasan "belum final", bukan dianggap terkirim.
+- Kanal tanpa id akun di `office.toml` ditolak sebelum satu permintaan pun keluar.
+- Galat HTTP OpenPost menjadi alasan yang bisa dibaca, dengan kode keluar 13 untuk konfigurasi kurang dan 14 untuk penolakan OpenPost.
+
+## Satu tumpukan dengan Studio
+
+`compose.jagoai.yml` menjalankan tiga wadah di satu pintu: kantor, OpenPost, dan Caddy.
+
+```bash
+docker compose -f compose.jagoai.yml up -d --build
+```
+
+| Alamat | Isi |
+|---|---|
+| `http://localhost:8088/` | kantor, lewat pintu Caddy |
+| `http://studio.localhost:8088` | Studio OpenPost, host yang sama, port yang sama |
+| `/studio` | pengalihan ke alamat Studio dari `office.toml` |
+
+Dua cara memakai OpenPost, pilih per tenant:
+
+| Cara | Siapa yang menyetujui | Perintah |
+|---|---|---|
+| kantor sebagai gerbang | manusia di kantor, lalu kantor menerbitkan | `openpost --tanggal ... --oleh nama` |
+| OpenPost sebagai admin | manusia di Studio, kantor hanya menyetor draf | `openpost --draf`, lalu `openpost --sinkron <id>` |
+
+Pada cara kedua, `published` dicatat hanya kalau rendisi berstatus `published` **dan** review terakhir OpenPost disetujui. Nama penyetuju diambil dari `reviewer_id` OpenPost, dan pencatatan bersifat sekali jalan lewat `keluaran/openpost/sinkron.json`.
+
+## Layar Kontrol dan daftar tenant
+
+`/kontrol` dan `python -m app.cli kontrol --pekan 2026-11-02 --peran admin` membaca setiap folder
+`tenant/*/office.toml`, jadi tenant baru muncul sendiri tanpa didaftarkan di tempat lain.
+
+| Kolom | Arti |
+|---|---|
+| Tenant | nama folder tenant |
+| Token, Naskah, Video | angka pekan itu, dari fungsi yang sama dengan Vera |
+| Studio | nama ruang kerja OpenPost, atau `belum tersambung` beserta alasannya |
+| Akun, Draf, Terjadwal, Tayang | hitungan dari API OpenPost, disimpan 30 detik |
+
+Pasangan satuannya: satu tenant sama dengan satu ruang kerja OpenPost (`[openpost] ruang_kerja`).
+Kalau ruang kerja atau token belum diisi, layar tetap menampilkan tenant dengan alasan yang bisa dibaca,
+bukan menyembunyikannya.
+
+## Halaman Tenants di dalam Studio
+
+`http://studio.localhost:8088/tenants` dilayani kantor tetapi memakai host dan port Studio,
+dengan tampilan yang mengikuti tema Studio: latar gelap, aksen jingga, sidebar yang sama.
+
+Caddy mengarahkan `/tenants` dan `/api/kontrol` ke kantor lebih dulu, sisanya ke OpenPost.
+Datanya diambil dari `/api/kontrol`, jadi angkanya sama dengan layar Kontrol dan Vera.
+
+Batas yang disengaja: halaman ini tidak muncul di sidebar OpenPost karena sidebar itu berada di
+dalam bundel SvelteKit yang tertanam di biner OpenPost. Menambahkannya ke sana berarti memelihara
+fork, jadi untuk sekarang alamatnya dipakai langsung atau disimpan sebagai bookmark.
+
 ## Melihat kantor
 
 ```bash

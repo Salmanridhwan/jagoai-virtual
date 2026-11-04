@@ -34,7 +34,8 @@
 
   <div class="kotak">
     <strong>Batas peran admin</strong>
-    <p class="redup">Admin boleh mengubah batas, model, dan kunci, serta melihat semua tenant.
+    <p class="redup">Admin boleh mengubah batas, model, dan kunci, serta melihat semua tenant
+    beserta ruang kerja Studio masing-masing.
     Admin <span class="larang">tidak boleh</span> menyetujui konten atau balasan. Persetujuan isi
     hanya milik peran pengguna, karena yang menanggung akibat tayang adalah pemilik organisasi.</p>
     <p class="redup">Peran ditegakkan di kode, bukan hanya disembunyikan di layar: fungsi
@@ -52,13 +53,22 @@ async function muat(pekan) {
     $("tabel").textContent = "Belum ada tenant dengan office.toml.";
     return;
   }
-  const html = ["<table><thead><tr><th>Tenant</th><th>Token</th><th>Naskah</th><th>Video</th><th>Selisih angka</th></tr></thead><tbody>"];
+  const html = ["<table><thead><tr><th>Tenant</th><th>Token</th><th>Naskah</th><th>Video</th><th>Selisih angka</th><th>Studio</th><th>Akun</th><th>Draf</th><th>Terjadwal</th><th>Tayang</th></tr></thead><tbody>"];
   for (const t of baris) {
+    const s = t.studio || {};
+    const studio = s.siap
+      ? '<a href="/studio" target="_blank" rel="noreferrer">' + (s.nama || s.workspace) + "</a>"
+      : '<span class="larang" title="' + (s.galat || "") + '">belum tersambung</span>';
     html.push("<tr><td>" + t.tenant + "</td>"
       + '<td class="angka">' + t.token + "</td>"
       + '<td class="angka">' + t.naskah + "</td>"
       + '<td class="angka">' + t.video + "</td>"
-      + '<td class="angka">' + (t.galat < 0 ? "galat baca" : t.galat) + "</td></tr>");
+      + '<td class="angka">' + (t.galat < 0 ? "galat baca" : t.galat) + "</td>"
+      + "<td>" + studio + "</td>"
+      + '<td class="angka">' + (s.siap ? s.akun : "-") + "</td>"
+      + '<td class="angka">' + (s.siap ? s.draf : "-") + "</td>"
+      + '<td class="angka">' + (s.siap ? s.terjadwal : "-") + "</td>"
+      + '<td class="angka">' + (s.siap ? s.tayang : "-") + "</td></tr>");
   }
   html.push("</tbody></table>");
   $("tabel").innerHTML = html.join("");

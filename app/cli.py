@@ -6,7 +6,9 @@ from pathlib import Path
 
 from app import brief, config, env, gateway, models_registry, penjadwal, runtime
 from app import papan, tugas as tugas_mod
-from app import percakapan, peran
+from app import kirim, openpost, percakapan, peran
+from app import antrean, desain, mira, omar, rekam, vera, video
+from app import data as data_mod
 
 
 def _argumen(argv):
@@ -111,6 +113,25 @@ def _argumen(argv):
     rk.add_argument("--bingkai", type=int, default=6, help="berapa bingkai dicetak")
     rk.add_argument("--mode", default="peristiwa", choices=("peristiwa", "jam"))
 
+    kr = sub.add_parser("kirim", help="kirim satu barang yang sudah disetujui ke kanal")
+    kr.add_argument("--tenant", default="jagoai")
+    kr.add_argument("--tanggal", required=True)
+    kr.add_argument("--jenis", default="balasan", choices=("balasan", "konten"))
+    kr.add_argument("--id", default="", help="id balasan, atau tanggal konten")
+    kr.add_argument("--oleh", required=True)
+    kr.add_argument("--peran", default="pengguna", choices=("pengguna", "admin"))
+
+    op = sub.add_parser("openpost", help="antre ke OpenPost setelah disetujui manusia")
+    op.add_argument("--tenant", default="jagoai")
+    op.add_argument("--cek", action="store_true", help="periksa ruang kerja dan akun terhubung")
+    op.add_argument("--draf", action="store_true", help="setor draf saja, tanpa menerbitkan")
+    op.add_argument("--sinkron", default="", help="baca keadaan satu publikasi OpenPost")
+    op.add_argument("--tanggal", default="")
+    op.add_argument("--jenis", default="balasan", choices=("balasan", "konten"))
+    op.add_argument("--id", default="", help="id balasan, atau tanggal konten")
+    op.add_argument("--oleh", default="")
+    op.add_argument("--peran", default="pengguna", choices=("pengguna", "admin"))
+
     return p.parse_args(argv)
 
 
@@ -172,8 +193,73 @@ def main(argv=None):
             penjadwal.putar(root, a.tenant, jeda=a.jeda)
             return 0
 
+        if a.perintah == "openpost":
+            cfg_op = openpost.konfig(root, a.tenant)
+            if a.cek:
+                klien = openpost.Klien(cfg_op["url"], cfg_op["token"])
+                ruang = klien.ruang_kerja()
+                akun = klien.akun()
+                print("alamat: %s" % cfg_op["url"])
+                print("ruang kerja: %d" % len(ruang))
+                for r in ruang:
+                    print("  %s  %s" % (r.get("id"), r.get("name")))
+                print("akun terhubung: %d" % len(akun))
+                for k in akun:
+                    print("  %s  %s  %s" % (k.get("platform") or "-",
+                                            k.get("account_username") or "-", k.get("id")))
+                return 0
+            if a.sinkron:
+                hasil = openpost.sinkron(root, a.tenant, a.sinkron, tulis_event=True)
+                print("publikasi %s: status %s | keputusan %s | tayang %s"
+                      % (hasil["id"], ",".join(hasil["status"]) or "-",
+                         hasil["keputusan"] or "-", "ya" if hasil["tayang"] else "belum"))
+                if hasil["tautan"]:
+                    print("tautan: %s" % hasil["tautan"])
+                if hasil["reviewer"]:
+                    print("diputuskan oleh: %s pada %s" % (hasil["reviewer"],
+                                                           hasil["diputuskan_pada"] or "-"))
+                return 0
+            if a.draf:
+                if not a.tanggal:
+                    print("openpost --draf butuh --tanggal")
+                    return 2
+                kunci = a.id or a.tanggal
+                antrean = kirim.muat_antrean(root, a.tenant, a.tanggal)
+                item = kirim.cari_item(antrean, a.jenis, kunci)
+                if item is None:
+                    print("%s %s tidak ada di antrean %s" % (a.jenis, kunci, a.tanggal))
+                    return 4
+                hasil = openpost.kirim_draf(root, a.tenant, item)
+                print("draf tersetor: %s (revisi %s, status %s)"
+                      % (hasil["id"], hasil["revisi"], hasil["status"]))
+                print("tinjau dan terbitkan dari Studio: python -m app.cli openpost --cek")
+                return 0
+            if not a.tanggal or not a.oleh:
+                print("openpost butuh --tanggal dan --oleh")
+                return 2
+            kunci = a.id or a.tanggal
+            catatan = kirim.kirim(root, a.tenant, a.tanggal, a.jenis, kunci, a.oleh,
+                                  peran_pengguna=a.peran,
+                                  pengirim=openpost.pengirim(root, a.tenant))
+            print("terkirim lewat OpenPost: %s %s ke %s oleh %s, disetujui %s" % (
+                catatan["jenis"], catatan["kunci"], catatan["kanal"],
+                catatan["oleh"], catatan["disetujui_oleh"]))
+            if catatan.get("tautan"):
+                print("tautan: %s" % catatan["tautan"])
+            return 0
+
+        if a.perintah == "kirim":
+            kunci = a.id or a.tanggal
+            catatan = kirim.kirim(root, a.tenant, a.tanggal, a.jenis, kunci,
+                                    a.oleh, peran_pengguna=a.peran)
+            print("terkirim: %s %s ke %s oleh %s, disetujui %s" % (
+                catatan["jenis"], catatan["kunci"], catatan["kanal"],
+                catatan["oleh"], catatan["disetujui_oleh"]))
+            if catatan.get("tautan"):
+                print("tautan: %s" % catatan["tautan"])
+            return 0
+
         if a.perintah == "rekam":
-            from app import rekam
             tanggal = a.tanggal or (rekam.daftar_tanggal(root, a.tenant) or [""])[-1]
             d = rekam.bingkai(root, a.tenant, tanggal, a.langkah, mode=a.mode)
             if d["kosong"]:
@@ -188,20 +274,19 @@ def main(argv=None):
             return 0
 
         if a.perintah == "data":
-            from app import data
             if a.cocokkan:
-                selisih = data.cocokkan(root, a.tenant, a.pekan)
+                selisih = data_mod.cocokkan(root, a.tenant, a.pekan)
                 print("selisih dengan Vera: %d" % len(selisih))
                 for s in selisih:
                     print("  %s: tabel %s, vera %s" % (s["angka"], s["tabel"], s["vera"]))
                 return 0 if not selisih else 6
-            nama = list(data.TABEL) if a.tabel == "semua" else [a.tabel]
+            nama = list(data_mod.TABEL) if a.tabel == "semua" else [a.tabel]
             for t in nama:
                 if a.ekspor:
-                    berkas, jumlah = data.ekspor(root, a.tenant, t, a.pekan, a.ekspor)
+                    berkas, jumlah = data_mod.ekspor(root, a.tenant, t, a.pekan, a.ekspor)
                     print("%-11s %3d baris -> %s" % (t, jumlah, berkas))
                 else:
-                    baris = data.tabel(t, root, a.tenant, a.pekan)
+                    baris = data_mod.tabel(t, root, a.tenant, a.pekan)
                     print("%s: %d baris" % (t, len(baris)))
                     for b in baris[:3]:
                         print("   " + " | ".join("%s=%s" % (k, v) for k, v in b.items()
@@ -211,15 +296,20 @@ def main(argv=None):
             return 0
 
         if a.perintah == "kontrol":
-            from app import peran
             peran.wajib(a.peran, "lihat_semua_tenant")
             for h in peran.ringkas_platform(root, a.pekan):
                 print("%-10s token %-7d naskah %-3d video %-3d galat %d" % (
                     h["tenant"], h["token"], h["naskah"], h["video"], h["galat"]))
+                studio = openpost.ringkas_tenant(root, h["tenant"])
+                if studio["siap"]:
+                    print("%-10s studio %s (%s) akun %d draf %d terjadwal %d tayang %d" % (
+                        "", studio["workspace"], studio["nama"] or "tanpa nama",
+                        studio["akun"], studio["draf"], studio["terjadwal"], studio["tayang"]))
+                else:
+                    print("%-10s studio belum tersambung: %s" % ("", studio["galat"] or "-"))
             return 0
 
         if a.perintah == "laporan":
-            from app import vera
             d = vera.tulis(root, a.tenant, a.pekan)
             print("pekan %s | token %d | naskah %d | desain lulus %d | video %d | tinjauan %s" % (
                 d["pekan"], d["token_total"], d["isi"]["naskah"], d["isi"]["desain_lulus"],
@@ -230,7 +320,6 @@ def main(argv=None):
             return 0
 
         if a.perintah == "mira":
-            from app import mira
             if a.setujui:
                 data = mira.setujui_konten(root, a.tenant, a.tanggal, a.oleh, a.catatan)
                 print("disetujui oleh %s pada %s" % (data["oleh"], data["pada"]))
@@ -248,7 +337,6 @@ def main(argv=None):
             return 0
 
         if a.perintah == "antrean":
-            from app import antrean
             h = antrean.susun(root, a.tenant, a.tanggal)
             print("masuk %d | ditolak %d | siap unggah manual %d" % (
                 h["jumlah"]["masuk"], h["jumlah"]["ditolak"], h["jumlah"]["manual"]))
@@ -280,7 +368,6 @@ def main(argv=None):
             return 0
 
         if a.perintah == "tinjau":
-            from app import omar
             h = omar.tinjau(root, a.tenant, a.tanggal, pekan=a.pekan or a.tanggal,
                             kunci=_kunci(cfg, a.tenant, a.kunci))
             print("status: %s" % h["status"])
@@ -296,7 +383,6 @@ def main(argv=None):
             return {"lulus": 0, "tolak": 6, "manual": 7}[h["status"]]
 
         if a.perintah == "video":
-            from app import desain, video
             folder = root / "tenant" / a.tenant / "keluaran" / "desain" / a.tanggal
             if not folder.exists():
                 print("slide untuk %s belum ada, jalankan perintah desain dulu" % a.tanggal)
@@ -328,7 +414,6 @@ def main(argv=None):
             return 0
 
         if a.perintah == "desain":
-            from app import desain
             pola = sorted((root / "tenant" / a.tenant / "keluaran" / "naskah" / a.pekan)
                           .glob(a.tanggal + "-*.md"))
             if not pola:
@@ -416,6 +501,9 @@ def main(argv=None):
     except tugas_mod.TugasGagal as e:
         print("tugas gagal: %s (%s)" % (e, "; ".join(e.kesalahan)))
         return 9
+    except kirim.KirimDitolak as e:
+        print("kirim ditolak: %s" % e)
+        return 12
     except peran.AksesDitolak as e:
         print("akses ditolak: %s" % e)
         return 11
@@ -425,6 +513,12 @@ def main(argv=None):
     except percakapan.SumberBelumAda as e:
         print("sumber percakapan belum ada: %s" % e)
         return 10
+    except openpost.OpenPostBelumSiap as e:
+        print("openpost belum siap: %s" % e)
+        return 13
+    except openpost.OpenPostGalat as e:
+        print("openpost menolak: %s" % e)
+        return 14
 
     return 1
 

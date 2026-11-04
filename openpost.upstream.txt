@@ -1,0 +1,6 @@
+sumber: https://github.com/getopenpost/openpost
+commit: e0bc6c331406912b701d1110f3cc037d1ce54a26
+disalin: 2026-11-04
+lisensi: AGPL-3.0-only, lihat openpost/LICENSE
+catatan: folder openpost/ diabaikan git supaya riwayat tidak membengkak 349 MB.
+         perubahan kita dicatat sebagai patch di deploy/openpost/.

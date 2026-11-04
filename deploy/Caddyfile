@@ -1,0 +1,19 @@
+# Satu pintu untuk kantor dan Studio.
+# /tenants dan /api/kontrol selalu dilayani kantor, supaya halaman Tenants
+# bisa dibuka dari dalam Studio dengan alamat yang sama.
+# Host studio.localhost selebihnya diteruskan ke OpenPost.
+:8088 {
+	@jalur path /tenants /tenants/ /tenants.html /api/kontrol
+	handle @jalur {
+		reverse_proxy office:4500
+	}
+
+	@studio host studio.localhost studio.localhost:8088
+	handle @studio {
+		reverse_proxy openpost:8080
+	}
+
+	handle {
+		reverse_proxy office:4500
+	}
+}

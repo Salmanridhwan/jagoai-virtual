@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<title>Tenants · JagoAI-Virtual</title>
+<style>
+  :root {
+    --latar: #0b0b0c;
+    --panel: #141416;
+    --panel-2: #1b1b1e;
+    --aktif: #242427;
+    --garis: #2a2a2e;
+    --teks: #f4f4f5;
+    --redup: #9a9aa2;
+    --jingga: #ff7a45;
+    --jingga-redup: #3a2118;
+    --hijau: #58c98a;
+    --merah: #ff8a8a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--latar); color: var(--teks);
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif; font-size: 14px;
+  }
+  .tata { display: grid; grid-template-columns: 244px 1fr; min-height: 100vh; }
+
+  /* sisi kiri, meniru sidebar Studio */
+  aside { background: #0f0f11; border-right: 1px solid var(--garis); padding: 16px 12px; }
+  .merek { display: flex; align-items: center; gap: 10px; padding: 4px 6px 14px; }
+  .lambang { width: 28px; height: 28px; border-radius: 8px; background: var(--jingga);
+             display: grid; place-items: center; font-weight: 700; font-size: 13px; color: #1b0d07; }
+  .merek b { font-size: 14px; letter-spacing: .2px; }
+  .merek span { color: var(--redup); font-size: 11px; }
+  .tombol-baru {
+    display: flex; align-items: center; gap: 8px; width: 100%;
+    background: #f6b9a3; color: #241009; border: 0; border-radius: 10px;
+    padding: 10px 12px; font-weight: 600; font-size: 13px; cursor: pointer; margin-bottom: 14px;
+  }
+  nav a {
+    display: flex; align-items: center; gap: 10px; padding: 9px 10px; margin-bottom: 2px;
+    color: var(--redup); text-decoration: none; border-radius: 9px; font-size: 13.5px;
+  }
+  nav a:hover { background: #17171a; color: var(--teks); }
+  nav a.ini { background: var(--aktif); color: var(--teks); }
+  nav a .ikon { width: 16px; text-align: center; opacity: .85; }
+  .pemisah { height: 1px; background: var(--garis); margin: 12px 6px; }
+  .akun { position: absolute; bottom: 16px; left: 12px; right: 12px; display: flex; gap: 9px;
+          align-items: center; padding: 8px; border-radius: 10px; background: #141416; }
+  .akun .kepala { width: 28px; height: 28px; border-radius: 8px; background: #6b4a3a;
+                  display: grid; place-items: center; font-size: 11px; font-weight: 700; }
+  .akun div small { display: block; color: var(--redup); font-size: 11px; }
+
+  main { padding: 22px 28px 60px; }
+  .judul { display: flex; align-items: center; gap: 10px; }
+  .judul h1 { font-size: 26px; margin: 0; letter-spacing: -.2px; }
+  .judul .lingkar { color: var(--jingga); font-size: 18px; }
+  .tombol-garis {
+    margin-left: auto; background: transparent; color: var(--teks); border: 1px solid var(--garis);
+    border-radius: 9px; padding: 9px 14px; font-size: 13px; cursor: pointer;
+  }
+  .tombol-garis:hover { background: #17171a; }
+  .tab { display: flex; gap: 22px; margin-top: 18px; border-bottom: 1px solid var(--garis); }
+  .tab span { padding: 9px 0; color: var(--redup); font-size: 13.5px; }
+  .tab span.ini { color: var(--teks); box-shadow: inset 0 -2px 0 var(--jingga); }
+
+  .panel {
+    margin-top: 18px; background: var(--panel); border: 1px solid var(--garis);
+    border-radius: 14px; padding: 16px 18px; display: flex; align-items: center; gap: 16px;
+  }
+  .panel .kotak-ikon {
+    width: 44px; height: 44px; border-radius: 12px; background: var(--panel-2);
+    display: grid; place-items: center; color: var(--jingga); font-size: 18px;
+  }
+  .panel h2 { margin: 0 0 3px; font-size: 15px; }
+  .panel p { margin: 0; color: var(--redup); font-size: 13px; }
+  .panel .tombol-garis { margin-left: auto; }
+
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 13.5px; }
+  th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--garis); }
+  th { color: var(--redup); font-weight: 500; font-size: 11.5px; text-transform: uppercase; letter-spacing: .5px; }
+  tr:hover td { background: #121214; }
+  td.n { text-align: right; font-variant-numeric: tabular-nums; }
+  .nama { font-weight: 600; }
+  .sub { display: block; color: var(--redup); font-size: 11.5px; margin-top: 2px; }
+  .pilin { border-radius: 999px; padding: 3px 9px; font-size: 11.5px; display: inline-block; }
+  .pilin.ok { background: rgba(88,201,138,.12); color: var(--hijau); }
+  .pilin.belum { background: rgba(255,122,69,.12); color: var(--jingga); }
+  a.tautan { color: var(--jingga); text-decoration: none; }
+  a.tautan:hover { text-decoration: underline; }
+  .kosong { color: var(--redup); padding: 26px 12px; }
+  .catatan { margin-top: 26px; color: var(--redup); font-size: 12.5px; line-height: 1.6; }
+  .catatan code { color: #c9c9d1; background: #16161a; padding: 1px 5px; border-radius: 5px; }
+</style>
+</head>
+<body>
+<div class="tata">
+  <aside>
+    <div class="merek">
+      <div class="lambang">J</div>
+      <div><b>JagoAI-Virtual</b><span>ruang kerja kantor</span></div>
+    </div>
+    <button class="tombol-baru" onclick="location.href='/publications'">&#9999;&#65039;&nbsp; New post</button>
+    <nav>
+      <a href="/"><span class="ikon">&#8962;</span> Home</a>
+      <a href="/publications"><span class="ikon">&#9636;</span> Posts</a>
+      <a href="/inbox"><span class="ikon">&#9993;</span> Inbox</a>
+      <a href="/analytics"><span class="ikon">&#9639;</span> Analytics</a>
+      <a href="/ideas"><span class="ikon">&#9671;</span> Ideas</a>
+      <a href="/studio"><span class="ikon">&#9654;</span> Studio</a>
+      <a href="/media"><span class="ikon">&#9635;</span> Media</a>
+      <a href="/workflows"><span class="ikon">&#8635;</span> Automations</a>
+      <div class="pemisah"></div>
+      <a href="/tenants" class="ini"><span class="ikon">&#9635;</span> Tenants</a>
+      <a href="/accounts"><span class="ikon">&#9634;</span> Accounts</a>
+      <a href="/settings"><span class="ikon">&#9881;</span> Settings</a>
+    </nav>
+    <div class="akun">
+      <div class="kepala">JB</div>
+      <div><small>jagoai.business</small><small>jagoai.business@gmail</small></div>
+    </div>
+  </aside>
+
+  <main>
+    <div class="judul">
+      <span class="lingkar">&#8635;</span>
+      <h1>Tenants</h1>
+      <button class="tombol-garis" onclick="muat()">Refresh</button>
+    </div>
+
+    <div class="tab">
+      <span class="ini">Your tenants</span>
+      <span>Aktivitas</span>
+      <span>Koneksi Studio</span>
+    </div>
+
+    <div class="panel">
+      <div class="kotak-ikon">&#9635;</div>
+      <div>
+        <h2>Semua tenant yang berjalan di kantor ini</h2>
+        <p>Setiap folder <code>tenant/&lt;nama&gt;</code> di kantor menjadi satu tenant, dan satu tenant memakai satu ruang kerja Studio.</p>
+      </div>
+      <button class="tombol-garis" onclick="location.href='/kontrol'">Buka Kontrol</button>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Tenant</th><th>Ruang kerja</th><th>Status</th>
+          <th class="n">Akun</th><th class="n">Draf</th><th class="n">Terjadwal</th>
+          <th class="n">Tayang</th><th>Pekan</th>
+        </tr>
+      </thead>
+      <tbody id="isi">
+        <tr><td colspan="8" class="kosong">memuat tenant…</td></tr>
+      </tbody>
+    </table>
+
+    <p class="catatan">
+      Sumber angka: <code>/api/kontrol</code> di server kantor, dibaca ulang tiap 30 detik dari API Studio.
+      Tenant yang belum punya token atau <code>ruang_kerja</code> tetap tampil dengan status belum tersambung,
+      supaya tidak ada tenant yang hilang dari pandangan hanya karena setelannya kurang.
+    </p>
+  </main>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+function pekanSekarang() {
+  const d = new Date();
+  const geser = (d.getDay() + 6) % 7;
+  const senin = new Date(d.getFullYear(), d.getMonth(), d.getDate() - geser);
+  const p = (n) => String(n).padStart(2, "0");
+  return senin.getFullYear() + "-" + p(senin.getMonth() + 1) + "-" + p(senin.getDate());
+}
+
+async function muat() {
+  const pekan = pekanSekarang();
+  const tbody = $("isi");
+  try {
+    const r = await fetch("/api/kontrol?pekan=" + pekan, { headers: { "Accept": "application/json" } });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const d = await r.json();
+    const baris = d.tenant || [];
+    if (!baris.length) {
+      tbody.innerHTML = '<tr><td colspan="8" class="kosong">Belum ada tenant dengan office.toml.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = baris.map((t) => {
+      const s = t.studio || {};
+      const status = s.siap
+        ? '<span class="pilin ok">tersambung</span>'
+        : '<span class="pilin belum">belum tersambung</span>';
+      const ruang = s.siap
+        ? '<a class="tautan" href="/studio" target="_blank" rel="noreferrer">' + (s.nama || s.workspace) + "</a>"
+        : '<span class="sub">' + (s.galat || "belum diisi") + "</span>";
+      return "<tr>"
+        + '<td><span class="nama">' + t.tenant + "</span><span class=\"sub\">jagoai-virtual</span></td>"
+        + "<td>" + ruang + "</td>"
+        + "<td>" + status + "</td>"
+        + '<td class="n">' + (s.siap ? s.akun : "–") + "</td>"
+        + '<td class="n">' + (s.siap ? s.draf : "–") + "</td>"
+        + '<td class="n">' + (s.siap ? s.terjadwal : "–") + "</td>"
+        + '<td class="n">' + (s.siap ? s.tayang : "–") + "</td>"
+        + "<td>" + (d.pekan || pekan) + "</td>"
+        + "</tr>";
+    }).join("");
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="8" class="kosong">Tidak bisa membaca data kantor: ' + e.message + "</td></tr>";
+  }
+}
+
+muat();
+setInterval(muat, 30000);
+</script>
+</body>
+</html>

@@ -20,6 +20,16 @@ cdn_proyek = "jagoai-sosmed"
 cdn_kunci_env = "JAGOAI_CDN_API_KEY"
 cdn_jwt_env = "JAGOAI_CDN_JWT_TOKEN"
 
+[openpost]
+url = "http://localhost:8080"
+studio_url = "http://studio.localhost:8088"
+kunci_env = "JAGOAI_OPENPOST_TOKEN"
+ruang_kerja = ""
+media = ""
+tiktok = ""
+threads = ""
+instagram = ""
+
 [kanal]
 threads_env = "JAGOAI_THREADS_TOKEN"
 instagram_env = "JAGOAI_INSTAGRAM_TOKEN"
