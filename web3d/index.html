@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kantor JagoAI 3D</title>
+<style>
+  :root { --latar:#070a10; --garis:#1d2735; --teks:#eef2f8; --redup:#8fa2bd; --jingga:#ffb020; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; overflow:hidden; background:var(--latar); color:var(--teks);
+               font-family:"Segoe UI", system-ui, sans-serif; }
+  #kanvas { position:fixed; inset:0; }
+  .pita { position:fixed; top:18px; left:22px; right:22px; display:flex; gap:14px; align-items:baseline;
+          pointer-events:none; }
+  .pita h1 { font-size:18px; margin:0; letter-spacing:.2px; }
+  .pita small { color:var(--redup); font-size:12px; }
+  .pita .kanan { margin-left:auto; font-size:12px; color:var(--redup); }
+  .pita .kanan b { color:var(--jingga); font-weight:600; }
+  .daftar { position:fixed; left:22px; bottom:22px; background:rgba(12,18,28,.86);
+            border:1px solid var(--garis); border-radius:14px; padding:12px 14px; min-width:270px;
+            backdrop-filter: blur(6px); }
+  .daftar p { margin:0 0 9px; font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--redup); }
+  .baris { display:flex; align-items:center; gap:9px; font-size:13px; padding:4px 0; }
+  .titik { width:8px; height:8px; border-radius:50%; flex:none; }
+  .baris .keadaan { margin-left:auto; color:var(--redup); font-size:12px; }
+  .baris .token { color:#6f8299; font-size:11px; min-width:52px; text-align:right;
+                  font-variant-numeric: tabular-nums; }
+  .petunjuk { position:fixed; right:22px; bottom:22px; color:#63758d; font-size:11.5px; text-align:right; line-height:1.6; }
+  .galat { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); text-align:center;
+           color:var(--redup); font-size:13px; }
+</style>
+</head>
+<body>
+<div id="kanvas"></div>
+
+<div class="pita">
+  <h1>Kantor JagoAI</h1>
+  <small>ruang kerja tiga dimensi</small>
+  <div class="kanan">sumber <b id="sumber">memuat</b> · <span id="jam">--:--</span></div>
+</div>
+
+<div class="daftar">
+  <p>Karyawan</p>
+  <div id="baris"></div>
+</div>
+
+<div class="petunjuk">
+  geser untuk memutar · roda gulir untuk memperbesar<br>
+  data dari <code>/api/state</code>, cadangan <code>data/contoh-state.json</code>
+</div>
+
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>

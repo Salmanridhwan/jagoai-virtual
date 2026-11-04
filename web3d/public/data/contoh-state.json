@@ -1,0 +1,250 @@
+{
+ "tenant": "jagoai",
+ "tanggal": "2026-11-04",
+ "sekarang": "2026-11-04T11:44:06+0700",
+ "total_event": 86,
+ "token_tenant_hari_ini": 0,
+ "batas_tenant": 4200000,
+ "karyawan": [
+  {
+   "agent_id": "jagoai:mira",
+   "nama": "Mira",
+   "jabatan": "Kepala Studio",
+   "meja": "ruang:brief",
+   "model": "cbai/glm-5.2",
+   "state": "idle",
+   "sebab": "shift_end",
+   "umur_detik": 53524.0,
+   "token_hari_ini": 0,
+   "rencana_token": 400000,
+   "events": [
+    {
+     "kind": "llm_call",
+     "ts": "2026-11-03T20:40:14+0700",
+     "summary": "Meningkatkan efisiensi penyelesaian tugas harian dengan menerapkan sistem prioritas dan menghindari gangguan selama jam "
+    },
+    {
+     "kind": "shift_end",
+     "ts": "2026-11-03T20:40:14+0700",
+     "summary": ""
+    }
+   ]
+  },
+  {
+   "agent_id": "jagoai:rian",
+   "nama": "Rian",
+   "jabatan": "Perencana Konten",
+   "meja": "tetap:1",
+   "model": "cbai/kimi-k2.6",
+   "state": "idle",
+   "sebab": "shift_end",
+   "umur_detik": 52317.0,
+   "token_hari_ini": 0,
+   "rencana_token": 450000,
+   "events": [
+    {
+     "kind": "llm_call",
+     "ts": "2026-11-03T21:09:46+0700",
+     "summary": "[\n{\"tanggal\":\"2026-11-09\",\"kanal\":\"instagram\",\"format\":\"carousel\",\"topik\":\"5 kesalahan packing koper yang bikin baju ber"
+    },
+    {
+     "kind": "shift_end",
+     "ts": "2026-11-03T21:09:46+0700",
+     "summary": ""
+    }
+   ]
+  },
+  {
+   "agent_id": "jagoai:nadia",
+   "nama": "Nadia",
+   "jabatan": "Penulis Naskah dan Caption",
+   "meja": "tetap:2",
+   "model": "cbai/kimi-k2.6",
+   "state": "idle",
+   "sebab": "shift_end",
+   "umur_detik": 52290.0,
+   "token_hari_ini": 0,
+   "rencana_token": 500000,
+   "events": [
+    {
+     "kind": "llm_call",
+     "ts": "2026-11-03T20:52:17+0700",
+     "summary": "**Hook:**\n\n> *\"Tiga detik. Itu waktu yang dibutuhkan untuk tahu apakah ini berbeda dari yang pernah Anda coba.\"*"
+    },
+    {
+     "kind": "shift_end",
+     "ts": "2026-11-03T20:52:17+0700",
+     "summary": ""
+    }
+   ]
+  },
+  {
+   "agent_id": "jagoai:bayu",
+   "nama": "Bayu",
+   "jabatan": "Pemantau Percakapan",
+   "meja": "tetap:6",
+   "model": "cbai/kimi-k2.6",
+   "state": "coffee",
+   "sebab": "shift_end",
+   "umur_detik": 54529.0,
+   "token_hari_ini": 0,
+   "rencana_token": 400000,
+   "events": [
+    {
+     "kind": "shift_start",
+     "ts": "2026-11-03T20:35:02+0700",
+     "summary": ""
+    },
+    {
+     "kind": "llm_call",
+     "ts": "2026-11-03T20:35:17+0700",
+     "summary": "Percakapan yang layak dibalas adalah pertanyaan yang spesifik, sopan, dan relevan dengan konteks pembicaraan."
+    }
+   ]
+  },
+  {
+   "agent_id": "jagoai:sinta",
+   "nama": "Sinta",
+   "jabatan": "Penyusun Balasan",
+   "meja": "tetap:7",
+   "model": "cbai/kimi-k2.6",
+   "state": "idle",
+   "sebab": "shift_end",
+   "umur_detik": 47741.0,
+   "token_hari_ini": 0,
+   "rencana_token": 450000,
+   "events": [
+    {
+     "kind": "llm_call",
+     "ts": "2026-11-03T22:28:16+0700",
+     "summary": "Mulai dari definisi tujuan portfoliomu: tunjukkan proyek apa yang ingin disorot dan keterampilan apa yang relevan dengan"
+    },
+    {
+     "kind": "shift_end",
+     "ts": "2026-11-03T22:28:16+0700",
+     "summary": ""
+    }
+   ]
+  },
+  {
+   "agent_id": "jagoai:doni",
+   "nama": "Doni",
+   "jabatan": "Penyunting Video",
+   "meja": "ruang:sunting",
+   "model": "cbai/kimi-k2.6",
+   "state": "coffee",
+   "sebab": "shift_end",
+   "umur_detik": 54505.0,
+   "token_hari_ini": 0,
+   "rencana_token": 500000,
+   "events": [
+    {
+     "kind": "shift_start",
+     "ts": "2026-11-03T20:35:31+0700",
+     "summary": ""
+    },
+    {
+     "kind": "llm_call",
+     "ts": "2026-11-03T20:35:41+0700",
+     "summary": "Berikut tiga hal utama yang saya periksa sebelum mulai menyunting video:\n\n## 1. **Materi dan Struktur Konten**\n- Memasti"
+    }
+   ]
+  },
+  {
+   "agent_id": "jagoai:omar",
+   "nama": "Omar",
+   "jabatan": "Peninjau Mutu",
+   "meja": "tetap:10",
+   "model": "cbai/glm-5.2",
+   "state": "idle",
+   "sebab": "review_fail",
+   "umur_detik": 48102.0,
+   "token_hari_ini": 0,
+   "rencana_token": 350000,
+   "events": [
+    {
+     "kind": "shift_end",
+     "ts": "2026-11-03T22:21:02+0700",
+     "summary": ""
+    },
+    {
+     "kind": "shift_start",
+     "ts": "2026-11-03T22:22:09+0700",
+     "summary": ""
+    }
+   ]
+  },
+  {
+   "agent_id": "jagoai:kiki",
+   "nama": "Kiki",
+   "jabatan": "Distribusi dan Unggah",
+   "meja": "tetap:8",
+   "model": "cbai/kimi-k2.6",
+   "state": "coffee",
+   "sebab": "shift_end",
+   "umur_detik": 54479.0,
+   "token_hari_ini": 0,
+   "rencana_token": 300000,
+   "events": [
+    {
+     "kind": "shift_start",
+     "ts": "2026-11-03T20:36:00+0700",
+     "summary": ""
+    },
+    {
+     "kind": "llm_call",
+     "ts": "2026-11-03T20:36:07+0700",
+     "summary": "Berikut adalah dua syarat utama yang harus terpenuhi sebelum mengunggah sesuatu:\n\n## 1. **Kepemilikan Hak atau Izin yang"
+    }
+   ]
+  },
+  {
+   "agent_id": "jagoai:vera",
+   "nama": "Vera",
+   "jabatan": "Analis Kinerja",
+   "meja": "tetap:9",
+   "model": "cbai/glm-5.2",
+   "state": "idle",
+   "sebab": "shift_end",
+   "umur_detik": 53058.0,
+   "token_hari_ini": 0,
+   "rencana_token": 400000,
+   "events": [
+    {
+     "kind": "llm_call",
+     "ts": "2026-11-03T20:36:22+0700",
+     "summary": "Tentu, sebagai asisten coding, tiga \"angka\" utama yang biasanya dilaporkan atau dievaluasi setiap Senin (atau saat *week"
+    },
+    {
+     "kind": "shift_end",
+     "ts": "2026-11-03T20:36:22+0700",
+     "summary": ""
+    }
+   ]
+  },
+  {
+   "agent_id": "jagoai:dewi",
+   "nama": "Dewi",
+   "jabatan": "Desainer Feed",
+   "meja": "ruang:studio",
+   "model": "cbai/glm-5.2",
+   "state": "idle",
+   "sebab": "shift_end",
+   "umur_detik": 54187.0,
+   "token_hari_ini": 0,
+   "rencana_token": 450000,
+   "events": [
+    {
+     "kind": "shift_start",
+     "ts": "2026-11-03T20:40:41+0700",
+     "summary": ""
+    },
+    {
+     "kind": "llm_call",
+     "ts": "2026-11-03T20:40:52+0700",
+     "summary": "Sebagai asisten AI yang berfokus pada pengembangan dan desain antarmuka (UI/UX), berikut adalah **tiga aturan desain fee"
+    }
+   ]
+  }
+ ]
+}
