@@ -1,0 +1,79 @@
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { pathToFileURL } from "node:url";
+
+import {
+  fumadocsNavigationTargets,
+  localDocumentationTargetExists,
+  repositoryRoot,
+  unreachableDocumentationPages,
+} from "./check-doc-links.mjs";
+
+test("validates Fumadocs meta navigation and MDX link reachability", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "openpost-doc-links-"));
+  const docs = path.join(root, "apps/docs/content/docs");
+  await mkdir(path.join(docs, "guides"), { recursive: true });
+  await writeFile(
+    path.join(docs, "meta.json"),
+    JSON.stringify({
+      pages: ["index", "---Guides---", "[Overview](/guides)", "...guides"],
+    }),
+  );
+  await writeFile(path.join(docs, "index.mdx"), "[Quickstart](/guides/quickstart)");
+  await writeFile(
+    path.join(docs, "guides", "meta.json"),
+    JSON.stringify({ pages: ["!index", "quickstart"] }),
+  );
+  await writeFile(path.join(docs, "guides", "index.mdx"), "Overview");
+  await writeFile(path.join(docs, "guides", "quickstart.mdx"), "Done");
+  await mkdir(path.join(docs, "unindexed"));
+  await writeFile(path.join(docs, "unindexed", "child.mdx"), "Child page");
+
+  assert.deepEqual(fumadocsNavigationTargets(root), ["/", "/guides", "/guides/quickstart"]);
+  assert.equal(
+    localDocumentationTargetExists(root, "apps/docs/content/docs/index.mdx", "/guides/missing"),
+    false,
+  );
+  assert.equal(
+    localDocumentationTargetExists(root, "apps/docs/content/docs/index.mdx", "/docs/unindexed"),
+    false,
+  );
+  assert.deepEqual(
+    unreachableDocumentationPages(
+      root,
+      ["apps/docs/content/docs/index.mdx", "apps/docs/content/docs/guides/quickstart.mdx"],
+      ["/", "/guides", "/guides/quickstart"],
+    ),
+    [],
+  );
+});
+
+test("finds pages that are outside the configured documentation graph", () => {
+  const pages = [
+    "apps/docs/content/docs/index.mdx",
+    "apps/docs/content/docs/guide/index.md",
+    "apps/docs/content/docs/guide/setup.md",
+    "apps/docs/content/docs/guide/details.md",
+    "apps/docs/content/docs/orphan.mdx",
+  ];
+  const contents = new Map([
+    ["apps/docs/content/docs/index.mdx", "[Guide](/guide/)"],
+    ["apps/docs/content/docs/guide/index.md", "[Setup](./setup)"],
+    ["apps/docs/content/docs/guide/setup.md", "[Details](./details.md)"],
+    ["apps/docs/content/docs/guide/details.md", "Done"],
+    ["apps/docs/content/docs/orphan.mdx", "Not linked"],
+  ]);
+
+  assert.deepEqual(
+    unreachableDocumentationPages(
+      repositoryRoot,
+      pages,
+      ["/guide/"],
+      (file) => contents.get(file) ?? "",
+    ),
+    ["apps/docs/content/docs/orphan.mdx"],
+  );
+});

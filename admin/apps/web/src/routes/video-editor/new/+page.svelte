@@ -1,0 +1,137 @@
+<script lang="ts">
+	import { appBranding } from '$lib/app-branding.svelte';
+	import VideoEditorChoice from '$lib/components/video-editor-choice.svelte';
+	import { workspaceCtx } from '$lib/stores/workspace.svelte';
+	import { CloudVideoProjectRepository } from '$lib/video-editor/cloud/project-repository';
+	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
+	import InlineNotice from '$lib/components/inline-notice.svelte';
+	import Logo from '$lib/components/Logo.svelte';
+	import PageLoading from '$lib/components/page-loading.svelte';
+	import { Button } from '$lib/components/ui/button';
+	import { m } from '$lib/paraglide/messages';
+	import WorkspaceGatePanel from '$lib/video-editor/components/workspace-gate-panel.svelte';
+	import { createWorkspaceGate } from '$lib/video-editor/gate/workspace-gate.svelte';
+	import { createBlankProject } from '$lib/video-editor/project/defaults';
+	import { createProject } from '$lib/video-editor/workspace-fs/projects';
+
+	const gate = createWorkspaceGate();
+	let attemptedRequest = $state('');
+	let error = $state('');
+	let fullEditor = $state(false);
+	const quickHref = $derived(`/quick-cut${page.url.search}`);
+
+	const request = $derived.by(() => {
+		const name = page.url.searchParams.get('name')?.trim() || m.video_editor_project_untitled();
+		const source = page.url.searchParams.get('source');
+		const returnPublicationId = page.url.searchParams.get('return')?.trim() || null;
+		return {
+			key: `${name}\u0000${source ?? ''}\u0000${returnPublicationId ?? ''}`,
+			name,
+			source,
+			returnPublicationId
+		};
+	});
+
+	$effect(() => {
+		if (
+			!fullEditor ||
+			(!workspaceCtx.currentWorkspace?.id && gate.state !== 'ready') ||
+			attemptedRequest === request.key
+		)
+			return;
+		attemptedRequest = request.key;
+		error = '';
+		void createAndOpen(request.name, request.source, request.returnPublicationId);
+	});
+
+	async function createAndOpen(
+		name: string,
+		source: string | null,
+		returnPublicationId: string | null
+	): Promise<void> {
+		try {
+			const project = createBlankProject(name);
+			const workspaceId = workspaceCtx.currentWorkspace?.id;
+			if (workspaceId) {
+				const repository = new CloudVideoProjectRepository(workspaceId);
+				await repository.createWithId(project.id, project.name, project);
+			} else await createProject(project);
+			const query = new URLSearchParams();
+			if (workspaceId) query.set('storage', 'cloud');
+			if (source) query.set('source', source);
+			if (returnPublicationId) query.set('return', returnPublicationId);
+			const target = `/video-editor/${project.id}${query.size > 0 ? `?${query}` : ''}`;
+			await goto(target, { replaceState: true });
+		} catch (cause) {
+			error = cause instanceof Error ? cause.message : String(cause);
+		}
+	}
+
+	function retry(): void {
+		attemptedRequest = '';
+	}
+</script>
+
+<svelte:head>
+	<title>{appBranding.title(m.video_editor_title())}</title>
+	<meta
+		name="description"
+		content="Record or import footage, edit for four social formats, and export without a watermark."
+	/>
+	<link rel="canonical" href="https://app.openpo.st/video-editor/new" />
+	<meta property="og:site_name" content="OpenPost" />
+	<meta property="og:type" content="website" />
+	<meta property="og:title" content="Free social media video editor - OpenPost Video Editor" />
+	<meta
+		property="og:description"
+		content="Record or import footage, edit for four social formats, and export without a watermark."
+	/>
+	<meta property="og:url" content="https://app.openpo.st/video-editor/new" />
+	<meta property="og:image" content="https://app.openpo.st/og/app-video-editor.png" />
+	<meta property="og:image:secure_url" content="https://app.openpo.st/og/app-video-editor.png" />
+	<meta property="og:image:type" content="image/png" />
+	<meta property="og:image:width" content="1200" />
+	<meta property="og:image:height" content="630" />
+	<meta property="og:image:alt" content="Video Editor OpenPost editor social preview." />
+	<meta name="twitter:card" content="summary_large_image" />
+	<meta name="twitter:title" content="Free social media video editor - OpenPost Video Editor" />
+	<meta
+		name="twitter:description"
+		content="Record or import footage, edit for four social formats, and export without a watermark."
+	/>
+	<meta name="twitter:image" content="https://app.openpo.st/og/app-video-editor.png" />
+	<meta name="twitter:image:alt" content="Video Editor OpenPost editor social preview." />
+</svelte:head>
+
+<div
+	class="video-editor-theme flex min-h-dvh flex-col bg-[var(--video-editor-canvas)] text-[var(--video-editor-text)]"
+>
+	<header class="border-b border-[var(--video-editor-border)] px-4 py-2">
+		<a
+			href="/video-editor"
+			class="flex w-fit items-center gap-2 rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--video-editor-focus)]"
+		>
+			<Logo class="h-5 w-auto" />
+			<span class="text-sm font-semibold">{m.video_editor_title()}</span>
+		</a>
+	</header>
+
+	<main class="flex flex-1 flex-col items-center justify-center px-4 py-10">
+		{#if !fullEditor}
+			<VideoEditorChoice {quickHref} onfull={() => (fullEditor = true)} />
+		{:else if !workspaceCtx.currentWorkspace?.id && gate.state !== 'ready'}
+			<WorkspaceGatePanel {gate} />
+		{:else if error}
+			<div class="w-full max-w-md">
+				<InlineNotice tone="error">{error}</InlineNotice>
+				<div class="mt-4 flex justify-center gap-2">
+					<Button variant="outline" href="/video-editor">{m.video_editor_go_back()}</Button>
+					<Button onclick={retry}>{m.common_retry()}</Button>
+				</div>
+			</div>
+		{:else}
+			<PageLoading label={m.editors_loading()} />
+		{/if}
+	</main>
+</div>

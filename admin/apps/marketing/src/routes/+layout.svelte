@@ -1,0 +1,168 @@
+<script lang="ts">
+	import './layout.css';
+	import { page } from '$app/state';
+	import { resolve } from '$app/paths';
+	import {
+		marketingAgentMarkdownUrl,
+		marketingTelemetryPath,
+		resolveMarketingSocial
+	} from '@openpost/social-images';
+	import { ModeWatcher } from 'mode-watcher';
+	import { onMount } from 'svelte';
+	import { afterNavigate } from '$app/navigation';
+	import {
+		captureTelemetryPageView,
+		captureTelemetryEvent,
+		configureTelemetry,
+		installGlobalErrorCapture,
+		telemetryConsentCopy
+	} from '@openpost/telemetry';
+	import { soundPreferences } from '$lib/stores/sound-preferences.svelte';
+	import MarketingFooter from './_components/MarketingFooter.svelte';
+	import MarketingNav from './_components/MarketingNav.svelte';
+	import { structuredDataForMarketingPage } from './_structured-data';
+	import TelemetryConsent from '$lib/components/telemetry-consent.svelte';
+
+	let { children } = $props();
+	const social = $derived(resolveMarketingSocial(page.url.pathname));
+	const socialImage = $derived(social.imageUrl);
+	const agentMarkdown = $derived(marketingAgentMarkdownUrl(social));
+	const structuredData = $derived(structuredDataForMarketingPage(social));
+	const structuredDataJSON = $derived(JSON.stringify(structuredData).replaceAll('<', '\\u003c'));
+
+	afterNavigate((navigation) => {
+		captureTelemetryPageView(
+			marketingTelemetryPath(navigation.to?.url.pathname ?? page.url.pathname)
+		);
+	});
+
+	onMount(() => {
+		soundPreferences.initialize();
+		configureTelemetry({
+			enabled: Boolean(
+				import.meta.env.VITE_POSTHOG_PROJECT_TOKEN && import.meta.env.VITE_POSTHOG_API_HOST
+			),
+			projectToken: import.meta.env.VITE_POSTHOG_PROJECT_TOKEN,
+			apiHost: import.meta.env.VITE_POSTHOG_API_HOST,
+			uiHost: import.meta.env.VITE_POSTHOG_UI_HOST,
+			environment: import.meta.env.VITE_OPENPOST_ENVIRONMENT || 'development',
+			edition: 'public',
+			version: import.meta.env.VITE_OPENPOST_VERSION,
+			revision: import.meta.env.VITE_OPENPOST_REVISION,
+			surface: 'marketing'
+		});
+		const removeErrorCapture = installGlobalErrorCapture();
+		function measureCTA(event: MouseEvent) {
+			if (!(event.target instanceof Element)) return;
+			const anchor = event.target.closest('a');
+			if (!anchor) return;
+			const url = new URL(anchor.href, location.origin);
+			let action: 'signup' | 'pricing' | 'docs' | 'tool' | 'github';
+			let target: string;
+			if (url.origin === 'https://app.openpo.st' && url.pathname === '/register') {
+				action = 'signup';
+				target = '/register';
+			} else if (url.origin === location.origin && url.pathname === '/pricing') {
+				action = 'pricing';
+				target = '/pricing';
+			} else if (url.origin === location.origin && /^\/docs(?:\/|$)/.test(url.pathname)) {
+				action = 'docs';
+				target = '/docs';
+			} else if (
+				url.origin === location.origin &&
+				url.pathname.startsWith('/tools/') &&
+				marketingTelemetryPath(url.pathname) !== '/unknown'
+			) {
+				action = 'tool';
+				target = marketingTelemetryPath(url.pathname);
+			} else if (url.origin === 'https://github.com' && url.pathname === '/getopenpost/openpost') {
+				action = 'github';
+				target = 'openpost_repository';
+			} else return;
+			const placement = anchor.closest('header,nav')
+				? 'navigation'
+				: anchor.closest('footer')
+					? 'footer'
+					: 'page';
+			captureTelemetryEvent('marketing cta clicked', { action, placement, target });
+		}
+		document.addEventListener('click', measureCTA);
+		return () => {
+			removeErrorCapture();
+			document.removeEventListener('click', measureCTA);
+		};
+	});
+</script>
+
+<svelte:head>
+	<title>{social.title}</title>
+	<meta name="description" content={social.description} />
+	<link rel="canonical" href={social.canonical} />
+	<link
+		rel="alternate"
+		type="application/atom+xml"
+		href="https://openpo.st/changelog.xml"
+		title="OpenPost changelog"
+	/>
+	<meta name="robots" content="index, follow" />
+	<meta property="og:site_name" content="OpenPost" />
+	<meta property="og:type" content="website" />
+	<meta property="og:title" content={social.socialTitle} />
+	<meta property="og:description" content={social.description} />
+	<meta property="og:url" content={social.canonical} />
+	<meta property="og:image" content={socialImage} />
+	<meta property="og:image:secure_url" content={socialImage} />
+	<meta property="og:image:type" content="image/png" />
+	<meta property="og:image:width" content="1200" />
+	<meta property="og:image:height" content="630" />
+	<meta property="og:image:alt" content={social.imageAlt} />
+	<meta name="twitter:card" content="summary_large_image" />
+	<meta name="twitter:title" content={social.socialTitle} />
+	<meta name="twitter:description" content={social.description} />
+	<meta name="twitter:image" content={socialImage} />
+	<meta name="twitter:image:alt" content={social.imageAlt} />
+	{#if agentMarkdown}
+		<link rel="alternate" type="text/markdown" href={agentMarkdown} />
+		<link
+			rel="alternate"
+			type="text/markdown"
+			href="https://openpo.st/sitemap.md"
+			title="Markdown sitemap"
+		/>
+		<link rel="alternate" type="text/plain" href="https://openpo.st/llms.txt" title="llms.txt" />
+		<link
+			rel="alternate"
+			type="text/plain"
+			href="https://openpo.st/llms-full.txt"
+			title="Product overview"
+		/>
+	{/if}
+	<!-- SAFETY: JSON is built only from maintained route and product constants; '<' is escaped above. -->
+	{@html `<script type="application/ld+json">${structuredDataJSON}<\/script>`}
+</svelte:head>
+
+<ModeWatcher
+	defaultMode="system"
+	synchronousModeChanges
+	themeColors={{
+		light: 'oklch(0.985 0.002 80)',
+		dark: 'oklch(0.145 0.008 55)'
+	}}
+/>
+
+<a
+	href="#main-content"
+	class="sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:block focus:rounded-md focus:bg-background focus:px-4 focus:py-2 focus:text-foreground focus:shadow-lg"
+>
+	Skip to content
+</a>
+
+<div data-theme-button="dither" class="min-h-screen bg-background text-foreground">
+	<MarketingNav />
+	<main id="main-content">
+		{@render children()}
+	</main>
+	<MarketingFooter />
+</div>
+
+<TelemetryConsent {...telemetryConsentCopy} privacyHref={resolve('/privacy')} />

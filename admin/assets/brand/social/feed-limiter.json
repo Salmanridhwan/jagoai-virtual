@@ -1,0 +1,7 @@
+{
+  "tool": "image_gen",
+  "date": "2026-10-12",
+  "asset": "feed-limiter.png",
+  "source": "Adapted from the approved feed-limiter Chrome Web Store promo artwork.",
+  "prompt": "Edit target: the attached approved OpenPost Feed Limiter promo image. Adapt this exact artwork into a wide 1200x630 (1.905:1) social sharing card. Preserve the same orange pause button, clock and flowing paper feed cards on sky blue, tactile paper texture, lighting, colors, short title and overall left-text/right-illustration concept. Recompose gently for the wider canvas; do not stretch or crop important content. Keep the full exact two-line title \"Feed Limiter\" on the left, about 72px equivalent type at 1200px width, with restrained whitespace. Keep exact small bottom-left label \"Browser extension\" at 26px equivalent. Remove the current OpenPost logo AND wordmark entirely and leave a clean warm ivory upper-left area (x40..350, y35..110 at 1200x630) for the official logo to be composited by our renderer. Do not put any replacement branding there. All text should have at least 60px left margin and 55px top/bottom margin. Keep the right illustration large and polished, comfortably within the wide card. No extra copy, no border, no watermark. The goal is to preserve the user's approved image faithfully, only adapting its aspect ratio and clearing the logo slot."
+}

@@ -1,0 +1,162 @@
+---
+title: Create and publish posts over HTTP
+description: Create a draft, choose destination variants, and inspect delivery over HTTP.
+icon: Send
+---
+
+The API calls a post a `Publication` and its destination variant a `Rendition`. A post owns the source text, schedule, and status. Each variant belongs to one connected account.
+
+## Create a draft
+
+```sh
+curl https://app.openpo.st/api/v1/publications \
+  -X POST \
+  -H "Authorization: Bearer $OPENPOST_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: release-2026-09-19-draft" \
+  --data '{
+    "workspace_id": "ws_...",
+    "title": "Launch day",
+    "content_profile": "short_text",
+    "source_text": "The new import flow is live.",
+    "social_account_ids": ["acc_linkedin", "acc_x"]
+  }'
+```
+
+Creating a Publication does not publish it. Omit `social_account_ids` for a draft without destinations. Pass `social_set_id` to initialize the destination snapshot from a Social Set.
+
+The server records raw HTTP creation as `creation_source: "api"`. The TypeScript SDK sends its own client identity and records `creation_source: "sdk"` instead.
+
+## Select people and company mentions
+
+Search through the account that will publish the post:
+
+```sh
+curl 'https://app.openpo.st/api/v1/accounts/acc_bluesky/mentions?query=alice' \
+  -H "Authorization: Bearer $OPENPOST_TOKEN"
+```
+
+Use the returned stable `target` with its visible label in a segment's `settings.mentions`:
+
+```json
+{
+  "body": "Hi @alice",
+  "settings": {
+    "mentions": {
+      "version": 1,
+      "spans": [
+        {
+          "start": 3,
+          "end": 9,
+          "text": "@alice",
+          "target": {
+            "provider": "bluesky",
+            "kind": "person",
+            "id": "did:plc:ewvi7nxzyoun6zhxrhs64oiz"
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+`start` and `end` are UTF-8 byte offsets, with the end excluded. In JavaScript, use `new TextEncoder().encode(prefix).length`, not string length. The selected text must match exactly. Each field accepts up to 50 selections.
+
+Choose targets separately for each network. Bluesky supports people, Mastodon searches accounts on the connected instance, and LinkedIn looks up a company page by its exact vanity name where the provider grants access. Search permission and rate-limit failures are returned as errors, not empty results.
+
+For an independent account version, put the text in `renditions[].segments[].body_override` and its annotations in that segment's `settings.mentions`. For a joined thread, pair each source's `body_override` with `source_overrides[].mentions`. Omitted metadata preserves unchanged selections; explicit `spans: []` removes selected tagging. Safe surrounding text edits retain identities. Ambiguous edits require updated annotations and fail without changing the draft.
+
+A literal qualified Mastodon address can trigger a mention even without a selected token. Drafts with unsupported mention choices can be inspected and edited, but validation blocks publishing until those choices are resolved.
+
+## Text cards for Instagram and Pixelfed
+
+New Instagram and Pixelfed variants default to `text_card: "text_only"`. The same creation path serves the web app, CLI, MCP and Workflows. Social Set defaults are copied on creation; explicit variant settings win. Existing variants without a setting remain unchanged.
+
+Use `text_card: "always"` to prepend the card to attached media, or `"off"` to disable conversion:
+
+```json
+{
+  "social_account_id": "acc_instagram",
+  "output_profile": "instagram.feed",
+  "format_locked": true,
+  "settings": {
+    "text_card": "always",
+    "text_card_appearance": "dark",
+    "text_card_background": "gradient",
+    "text_card_rounded": true,
+    "text_card_shadow": true
+  }
+}
+```
+
+Appearance accepts `light` or `dark`; background accepts `solid`, `gradient` or `mesh`. Colors are six-digit hex values. Omit `text_card_color` and `text_card_color_end` to use the capability catalogue defaults: the resolved capability carries the default for each `text_card_*` setting, and the server applies those defaults when the keys are absent, so clients must read them from the catalogue rather than restating a literal. Use `instagram.story` for vertical Story cards. Reels are not converted. Text is limited to 2,200 characters and can span multiple images, subject to the destination's media count limit.
+
+`POST /api/v1/publications/preview-text-card` accepts `social_account_id`, effective `text`, `output_profile`, `attachment_count`, and the same `settings`. It returns private JPEG data URLs in `images` without saving media. MCP exposes this renderer through `preview_text_card`, returning image content directly.
+
+After saving, read `renditions[].segments[].output_media` for the exact ordered delivery assets. Generated entries have `role: "text_card"`. Keep using `media` for authored attachments when editing or copying; do not send generated cards back as inputs. Original captions remain intact, and validation counts cards together with the original media.
+
+## Shared polls
+
+Put a shared poll in a canonical segment's `settings.poll`. Choose a mode for each account; missing choices may save as a draft but block publishing.
+
+```json
+{
+  "segments": [
+    {
+      "body": "Help us plan.",
+      "settings": {
+        "poll": {
+          "question": "What should we build next?",
+          "options": [
+            { "id": "workflows", "text": "Workflows" },
+            { "id": "analytics", "text": "Better analytics" }
+          ],
+          "duration_seconds": 86400,
+          "destinations": {
+            "acc_x": { "mode": "native" },
+            "acc_bluesky": { "mode": "text" }
+          }
+        }
+      }
+    }
+  ]
+}
+```
+
+`native` uses the shared poll, `text` appends the question and numbered answers, and `omit` keeps the rest of the destination post without a poll. For `custom`, include an independent `poll` object with question, options and duration inside that destination choice. Option IDs must be unique and stable. Answers contain one line each; commas remain part of the answer. Optional `multiple` and `hide_totals` flags require native destination support.
+
+When editing or copying, preserve the whole `settings.poll` object. Keep generated rendition text out of `body_override` to avoid duplicated poll text. Existing `poll_*` settings remain supported. Use `legacy` to retain that destination's independent poll when adding a shared poll. Poll choices do not change text or media overrides.
+
+## Validate and publish
+
+Validate the saved Publication before scheduling or publishing:
+
+```sh
+curl https://app.openpo.st/api/v1/publications/pub_.../validate \
+  -X POST \
+  -H "Authorization: Bearer $OPENPOST_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data '{}'
+```
+
+Send the revision from the latest Publication response when you schedule, publish, cancel, update, or replace Renditions. This example publishes immediately, so its job can be polled to completion:
+
+```sh
+curl https://app.openpo.st/api/v1/publications/pub_.../publish-now \
+  -X POST \
+  -H "Authorization: Bearer $OPENPOST_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: release-2026-09-19-publish" \
+  --data '{"expected_revision": 3}'
+```
+
+A `409` conflict means the Publication changed after revision 3. Read it again and reconcile the newer state before another write.
+
+To publish later, set `scheduled_at` to a future RFC 3339 time when you create or update the Publication, then call `/schedule` with the latest revision. Do not wait synchronously for that job: it stays pending until the scheduled time.
+
+## Inspect each destination
+
+Read `GET /publications/{id}` after the job finishes. Check each Rendition's status, provider URL, and error fields. Use `GET /publications/{id}/events` when you need the ordered lifecycle history.
+
+Start with the [create Publication reference](/api-reference/publications/create-publication), then use the operation list to find update bodies, Rendition fields, filters, cancellation, deletion, and failed-destination retries.

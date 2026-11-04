@@ -1,0 +1,69 @@
+# The caller supplies the validated, canonical frontend directory as a named
+# BuildKit context. CI builds this once, tests it, uploads it, and embeds the
+# same bytes here instead of invoking Vite again.
+FROM frontend_artifact AS frontend-builder
+
+# Build stage for backend
+FROM docker.io/library/golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS backend-builder
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+
+RUN apk add --no-cache gcc musl-dev sqlite-dev
+
+WORKDIR /app
+
+COPY apps/server/go.mod apps/server/go.sum ./apps/server/
+RUN --mount=type=cache,target=/go/pkg/mod \
+    cd apps/server && go mod download
+
+COPY apps/server/ ./apps/server/
+# Package the frontend-owned build output at the backend embed boundary.
+COPY --from=frontend-builder / ./apps/server/cmd/openpost/public
+
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    cd apps/server && CGO_ENABLED=1 GOOS=linux go build -buildvcs=false -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o openpost ./cmd/openpost
+
+# Runtime stage.
+FROM docker.io/library/alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS runtime
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+LABEL org.opencontainers.image.title="OpenPost" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${COMMIT}" \
+      org.opencontainers.image.source="https://github.com/getopenpost/openpost" \
+      org.opencontainers.image.base.name="docker.io/library/alpine:3.24.1" \
+      org.opencontainers.image.base.digest="sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
+
+RUN apk add --no-cache ca-certificates ffmpeg tzdata sqlite \
+    'libcrypto3>=3.5.8-r0' 'libssl3>=3.5.8-r0'
+
+RUN adduser -D -u 1000 openpost
+
+WORKDIR /app
+
+COPY --from=backend-builder /app/apps/server/openpost .
+
+RUN mkdir -p /data/media /data/db && chown -R openpost:openpost /data
+
+USER openpost
+
+ENV OPENPOST_PORT=8080
+ENV OPENPOST_EDITION=selfhost
+ENV OPENPOST_DATABASE_DRIVER=sqlite
+ENV OPENPOST_DATABASE_PATH=/data/db/openpost.db
+ENV OPENPOST_STORAGE_DRIVER=local
+ENV OPENPOST_MEDIA_PATH=/data/media
+ENV OPENPOST_DIAGNOSTICS_STATE_FILE=/data/diagnostics-installation-id
+
+EXPOSE 8080
+
+# Container health is process liveness. Traffic and rollout gates use /ready.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/api/v1/health || exit 1
+
+STOPSIGNAL SIGTERM
+
+CMD ["./openpost", "all"]

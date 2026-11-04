@@ -1,0 +1,4 @@
+apps/web/static/image-editor-models/[0-9a-f]* binary
+apps/web/static/image-editor-models/*.json text diff merge
+patches/** -whitespace
+apps/mobile/patches/** -whitespace

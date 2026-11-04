@@ -1,0 +1,911 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+	ALL_FORMATS,
+	AudioBufferSink,
+	BlobSource,
+	BufferTarget,
+	CanvasSink,
+	EncodedPacketSink,
+	Input,
+	Mp4OutputFormat,
+	Output,
+	VideoSample,
+	VideoSampleSource
+} from 'mediabunny';
+import { renderMultiTrackVideoArtifact, TimelineFrameRenderer } from './render-export';
+import { ResilientVideoFrameDecoder } from './render-video-decoder';
+import { mediaPool } from './pool.svelte';
+import type { Project } from '../project/types';
+import { getProxy, clearProxyCache } from './proxy-client';
+import { createTextMotionEffect } from '../timeline/text-motion-presets';
+import { ItemRasterizer } from './item-rasterizer';
+import { createFloat32WavBlob } from '../local-ai/audio';
+import { encodeLutData } from '../effects/gpu/lut';
+import type { GpuParamValues } from '../effects/gpu/types';
+
+const FPS = 30;
+const FRAME_COUNT = 60;
+
+async function sourceVideo(width = 64, height = 64): Promise<Blob> {
+	const target = new BufferTarget();
+	const output = new Output({ format: new Mp4OutputFormat(), target });
+	const source = new VideoSampleSource({ codec: 'avc', bitrate: 1_000_000, keyFrameInterval: 2 });
+	output.addVideoTrack(source, { frameRate: FPS });
+	await output.start();
+	const canvas = new OffscreenCanvas(width, height);
+	const context = canvas.getContext('2d')!;
+	for (let frame = 0; frame < FRAME_COUNT; frame++) {
+		context.fillStyle = `rgb(${frame * 4}, 40, 80)`;
+		context.fillRect(0, 0, width, height);
+		// Six high-contrast bits survive lossy encoding and identify every source frame.
+		for (let bit = 0; bit < 6; bit++) {
+			context.fillStyle = frame & (1 << bit) ? 'white' : 'black';
+			context.fillRect(bit * 10, 0, 10, 10);
+		}
+		const sample = new VideoSample(canvas, { timestamp: frame / FPS, duration: 1 / FPS });
+		await source.add(sample);
+		sample.close();
+	}
+	source.close();
+	await output.finalize();
+	return new Blob([target.buffer!], { type: 'video/mp4' });
+}
+
+function frameIdentity(canvas: OffscreenCanvas): number {
+	const context = canvas.getContext('2d')!;
+	let identity = 0;
+	for (let bit = 0; bit < 6; bit++) {
+		if (context.getImageData(bit * 10 + 5, 5, 1, 1).data[0]! > 128) identity += 2 ** bit;
+	}
+	return identity;
+}
+
+function sourceProject(isReversed = false): Project {
+	return {
+		id: 'decode-test',
+		name: 'Decode test',
+		description: '',
+		createdAt: 0,
+		updatedAt: 0,
+		duration: 2,
+		metadata: { width: 64, height: 64, fps: FPS },
+		timeline: {
+			tracks: [
+				{
+					id: 'v',
+					name: 'Video',
+					order: 0,
+					kind: 'video',
+					height: 80,
+					visible: true,
+					locked: false,
+					muted: false,
+					solo: false
+				}
+			],
+			items: [
+				{
+					id: 'clip',
+					type: 'video',
+					trackId: 'v',
+					mediaId: 'source',
+					from: 0,
+					durationInFrames: FRAME_COUNT,
+					label: 'Clip',
+					sourceFps: FPS,
+					sourceWidth: 64,
+					sourceHeight: 64,
+					isReversed
+				}
+			]
+		}
+	};
+}
+
+afterEach(() => {
+	mediaPool.clear();
+	vi.restoreAllMocks();
+});
+
+describe('timeline rendering', () => {
+	it.each([
+		{
+			name: 'landscape in square',
+			sourceWidth: 160,
+			sourceHeight: 90,
+			width: 160,
+			height: 160,
+			reverse: false
+		},
+		{
+			name: 'portrait in landscape',
+			sourceWidth: 90,
+			sourceHeight: 160,
+			width: 240,
+			height: 160,
+			reverse: false
+		},
+		{
+			name: 'reverse landscape in square',
+			sourceWidth: 160,
+			sourceHeight: 90,
+			width: 160,
+			height: 160,
+			reverse: true
+		}
+	])(
+		'preserves source pixels without baking bars into $name clips',
+		async ({ sourceWidth, sourceHeight, width, height, reverse }) => {
+			const blob = await sourceVideo(sourceWidth, sourceHeight);
+			const url = URL.createObjectURL(blob);
+			mediaPool.upsert(
+				{
+					id: 'source',
+					storageType: 'cloud',
+					remoteUrl: url,
+					fileName: 'source.mp4',
+					fileSize: blob.size,
+					mimeType: blob.type,
+					duration: 2,
+					width: sourceWidth,
+					height: sourceHeight,
+					fps: FPS,
+					codec: 'avc',
+					bitrate: 1_000_000,
+					tags: ['video']
+				},
+				'ready'
+			);
+			const project = sourceProject(reverse);
+			project.metadata = { width, height, fps: FPS, backgroundColor: '#00ff00' };
+			const clip = project.timeline!.items[0]!;
+			clip.sourceWidth = sourceWidth;
+			clip.sourceHeight = sourceHeight;
+			clip.transform = { width: sourceWidth, height: sourceHeight };
+			const renderer = new TimelineFrameRenderer(project);
+			try {
+				const canvas = await renderer.render(30);
+				const context = canvas.getContext('2d')!;
+				// These points lie inside the source picture, away from its frame-number strip.
+				// A decoder-padded frame squeezes the picture and turns them black.
+				for (const [x, y] of [
+					[(width - sourceWidth) / 2 + 15, (height - sourceHeight) / 2 + 15],
+					[(width + sourceWidth) / 2 - 15, (height + sourceHeight) / 2 - 15]
+				]) {
+					const pixel = context.getImageData(x!, y!, 1, 1).data;
+					expect(pixel[0]).toBeGreaterThan(90);
+					expect(pixel[1]).toBeGreaterThan(25);
+					expect(pixel[2]).toBeGreaterThan(60);
+				}
+				expect([...context.getImageData(0, 0, 1, 1).data]).toEqual([0, 255, 0, 255]);
+			} finally {
+				renderer.dispose();
+				URL.revokeObjectURL(url);
+			}
+		}
+	);
+
+	it('letterboxes the whole composition when exporting a different aspect ratio', async () => {
+		const project = sourceProject();
+		project.timeline!.items = [
+			{
+				id: 'square',
+				type: 'shape',
+				shapeType: 'rectangle',
+				fillColor: '#ff0000',
+				trackId: 'v',
+				from: 0,
+				durationInFrames: 60,
+				label: 'Square',
+				transform: { width: 32, height: 32 }
+			},
+			{
+				id: 'outside',
+				type: 'shape',
+				shapeType: 'rectangle',
+				fillColor: '#00ff00',
+				trackId: 'v',
+				from: 0,
+				durationInFrames: 60,
+				label: 'Outside canvas',
+				transform: { x: 48, width: 16, height: 16 }
+			}
+		];
+		const renderer = new TimelineFrameRenderer(project, { width: 128, height: 64 });
+		try {
+			const canvas = await renderer.render(0);
+			const pixels = canvas.getContext('2d')!.getImageData(0, 0, 128, 64).data;
+			let red = 0;
+			let green = 0;
+			for (let i = 0; i < pixels.length; i += 4) {
+				if (pixels[i]! > 240) red++;
+				if (pixels[i + 1]! > 240) green++;
+			}
+			expect(red).toBe(32 * 32);
+			expect(green).toBe(0);
+			expect([...canvas.getContext('2d')!.getImageData(48, 16, 1, 1).data]).toEqual([
+				255, 0, 0, 255
+			]);
+		} finally {
+			renderer.dispose();
+		}
+	});
+
+	it('keeps visual pixels in the frame and encoded export when an audio track is soloed', async () => {
+		const project = sourceProject();
+		project.duration = 0.1;
+		const timeline = project.timeline!;
+		timeline.tracks.push({
+			...timeline.tracks[0]!,
+			id: 'a',
+			name: 'Audio',
+			kind: 'audio',
+			order: 1,
+			solo: true
+		});
+		timeline.items = [
+			{
+				id: 'red',
+				type: 'shape',
+				trackId: 'v',
+				from: 0,
+				durationInFrames: 3,
+				label: 'Red rectangle',
+				shapeType: 'rectangle',
+				fillColor: '#ff0000'
+			},
+			{
+				id: 'tone',
+				type: 'audio',
+				trackId: 'a',
+				mediaId: 'tone',
+				from: 0,
+				durationInFrames: 3,
+				label: 'Solo tone'
+			}
+		];
+		const tone = createFloat32WavBlob(
+			[Float32Array.from({ length: 4800 }, (_, index) => Math.sin((index * Math.PI) / 24) * 0.2)],
+			48000
+		);
+		const url = URL.createObjectURL(tone);
+		mediaPool.upsert(
+			{
+				id: 'tone',
+				storageType: 'cloud',
+				remoteUrl: url,
+				fileName: 'tone.wav',
+				fileSize: tone.size,
+				mimeType: tone.type,
+				duration: 0.1,
+				width: 0,
+				height: 0,
+				fps: 0,
+				codec: 'pcm-f32',
+				bitrate: 1_536_000,
+				audioCodec: 'pcm-f32',
+				tags: []
+			},
+			'ready'
+		);
+		const renderer = new TimelineFrameRenderer(project);
+		let input: Input | undefined;
+		try {
+			const frame = await renderer.render(0);
+			expect
+				.soft([...frame.getContext('2d')!.getImageData(32, 32, 1, 1).data])
+				.toEqual([255, 0, 0, 255]);
+			const artifact = await renderMultiTrackVideoArtifact(project, {
+				format: 'webm',
+				codec: 'vp9',
+				quality: 'draft'
+			});
+			input = new Input({ source: new BlobSource(artifact.blob), formats: ALL_FORMATS });
+			const audio = (await input.getPrimaryAudioTrack())!;
+			expect(audio).not.toBeNull();
+			let audible = false;
+			for await (const { buffer } of new AudioBufferSink(audio).buffers()) {
+				audible ||= buffer.getChannelData(0).some((sample) => Math.abs(sample) > 0.05);
+			}
+			expect(audible).toBe(true);
+			const video = (await input.getPrimaryVideoTrack())!;
+			let count = 0;
+			for await (const { canvas } of new CanvasSink(video, { poolSize: 1 }).canvases()) {
+				const pixel = canvas.getContext('2d')!.getImageData(32, 32, 1, 1).data;
+				expect(pixel[0]).toBeGreaterThan(245);
+				expect(pixel[1]).toBeLessThan(10);
+				expect(pixel[2]).toBeLessThan(10);
+				count++;
+			}
+			expect(count).toBe(3);
+		} finally {
+			input?.dispose();
+			renderer.dispose();
+			URL.revokeObjectURL(url);
+		}
+	});
+
+	it('preserves invalid LUT pixels in preview and encoded output while applying a valid three-cube', async () => {
+		const blueData = new Uint8Array(3 ** 3 * 4);
+		for (let offset = 0; offset < blueData.length; offset += 4)
+			blueData.set([0, 0, 255, 255], offset);
+		const blue = { lutSize: 3, lutData: encodeLutData(blueData), intensity: 1 };
+		const variants: Array<{ params: GpuParamValues | null; pixel: number[]; enabled?: boolean }> = [
+			{ params: null, pixel: [80, 120, 160, 255] },
+			{ params: { lutSize: 3, lutData: '', intensity: 1 }, pixel: [80, 120, 160, 255] },
+			{ params: blue, pixel: [0, 0, 255, 255] },
+			{ params: { ...blue, intensity: 0 }, pixel: [80, 120, 160, 255] },
+			{ params: blue, pixel: [80, 120, 160, 255], enabled: false }
+		];
+		let baseline: number[][] | undefined;
+		for (const { params, pixel, enabled = true } of variants) {
+			const project = sourceProject();
+			project.duration = 0.1;
+			project.timeline!.items = [
+				{
+					id: 'shape',
+					type: 'shape',
+					trackId: 'v',
+					from: 0,
+					durationInFrames: 3,
+					label: 'LUT source',
+					shapeType: 'rectangle',
+					fillColor: '#5078a0',
+					effects: params ? [{ id: 'lut', type: 'gpu', effectId: 'gpu-lut', enabled, params }] : []
+				}
+			];
+			const renderer = new TimelineFrameRenderer(project);
+			let input: Input | undefined;
+			try {
+				const frame = await renderer.render(0);
+				expect([...frame.getContext('2d')!.getImageData(32, 32, 1, 1).data]).toEqual(pixel);
+				const artifact = await renderMultiTrackVideoArtifact(project, {
+					format: 'webm',
+					codec: 'vp9',
+					quality: 'draft'
+				});
+				input = new Input({ source: new BlobSource(artifact.blob), formats: ALL_FORMATS });
+				const video = (await input.getPrimaryVideoTrack())!;
+				const decoded: number[][] = [];
+				for await (const { canvas } of new CanvasSink(video, { poolSize: 1 }).canvases())
+					decoded.push([...canvas.getContext('2d')!.getImageData(32, 32, 1, 1).data]);
+				expect(decoded).toHaveLength(3);
+				if (!params) baseline = decoded;
+				else if (pixel[0] === 80) expect(decoded).toEqual(baseline);
+				else
+					for (const encodedPixel of decoded) {
+						expect(encodedPixel[0]).toBeLessThan(10);
+						expect(encodedPixel[1]).toBeLessThan(10);
+						expect(encodedPixel[2]).toBeGreaterThan(245);
+					}
+			} finally {
+				input?.dispose();
+				renderer.dispose();
+			}
+		}
+	});
+
+	it('bounds retained raster memory after compositing and releases it on disposal', () => {
+		const rasterizer = new ItemRasterizer(2048, 2048, FPS);
+		const canvases: OffscreenCanvas[] = [];
+		try {
+			for (let index = 0; index < 4; index++) {
+				const result = rasterizer.render(
+					{
+						id: `shape-${index}`,
+						type: 'shape',
+						trackId: 'v',
+						from: 0,
+						durationInFrames: 60,
+						label: 'Shape',
+						shapeType: 'rectangle',
+						fillColor: '#ff0000'
+					},
+					0
+				)!;
+				expect(result.source).toBeInstanceOf(OffscreenCanvas);
+				if (!(result.source instanceof OffscreenCanvas)) throw new Error('Expected canvas raster');
+				canvases.push(result.source);
+				expect([...result.source.getContext('2d')!.getImageData(1024, 1024, 1, 1).data]).toEqual([
+					255, 0, 0, 255
+				]);
+				rasterizer.release();
+				expect(
+					canvases.reduce((sum, canvas) => sum + canvas.width * canvas.height * 4, 0)
+				).toBeLessThanOrEqual(32 * 1024 * 1024);
+			}
+		} finally {
+			rasterizer.dispose();
+		}
+		expect(canvases.every((canvas) => canvas.width === 0 && canvas.height === 0)).toBe(true);
+	});
+
+	it('moves karaoke highlighting to the next word at its exact boundary', async () => {
+		const project = sourceProject();
+		project.metadata.width = 256;
+		project.timeline!.items = [
+			{
+				id: 'captions',
+				type: 'subtitle',
+				trackId: 'v',
+				from: 0,
+				durationInFrames: 60,
+				label: 'Captions',
+				fontFamily: 'sans-serif',
+				fontSize: 24,
+				color: '#ffffff',
+				captionHighlightMode: 'karaoke',
+				karaokeActiveColor: '#ff0000',
+				cues: [
+					{
+						id: 'cue',
+						startFrame: 0,
+						endFrame: 60,
+						text: 'AAAA BBBB',
+						words: [
+							{ id: 'word-a', text: 'AAAA', startFrame: 0, endFrame: 30 },
+							{ id: 'word-b', text: 'BBBB', startFrame: 30, endFrame: 60 }
+						]
+					}
+				]
+			}
+		];
+		const renderer = new TimelineFrameRenderer(project);
+		try {
+			for (const frame of [0, 29, 30, 59]) {
+				const pixels = (await renderer.render(frame))
+					.getContext('2d')!
+					.getImageData(0, 0, 256, 64).data;
+				const highlighted = [0, 0];
+				for (let pixel = 0; pixel < pixels.length; pixel += 4) {
+					if (pixels[pixel]! > 128 && pixels[pixel + 1]! < 64)
+						highlighted[(pixel / 4) % 256 < 128 ? 0 : 1]!++;
+				}
+				expect(highlighted[frame < 30 ? 0 : 1]).toBeGreaterThan(0);
+				expect(highlighted[frame < 30 ? 1 : 0]).toBe(0);
+			}
+		} finally {
+			renderer.dispose();
+		}
+	});
+
+	it('reuses unchanged caption pixels but paints the next cue at its exact frame', async () => {
+		const project = sourceProject();
+		project.timeline!.items = [
+			{
+				id: 'captions',
+				type: 'subtitle',
+				trackId: 'v',
+				from: 0,
+				durationInFrames: 60,
+				label: 'Captions',
+				fontFamily: 'sans-serif',
+				fontSize: 16,
+				color: '#ffffff',
+				cues: [
+					{ id: 'one', startFrame: 0, endFrame: 30, text: 'ONE' },
+					{ id: 'two', startFrame: 30, endFrame: 60, text: 'TWO' }
+				]
+			}
+		];
+		const paint = vi.spyOn(OffscreenCanvasRenderingContext2D.prototype, 'fillText');
+		const renderer = new TimelineFrameRenderer(project);
+		try {
+			const first = (await renderer.render(0)).getContext('2d')!.getImageData(0, 0, 64, 64).data;
+			expect(first.some((value, index) => index % 4 === 0 && value > 0)).toBe(true);
+			for (let frame = 1; frame < 30; frame++) await renderer.render(frame);
+			expect(paint.mock.calls.length).toBeLessThanOrEqual(1);
+			const unchanged = renderer.canvas.getContext('2d')!.getImageData(0, 0, 64, 64).data;
+			expect(unchanged).toEqual(first);
+			const next = (await renderer.render(30)).getContext('2d')!.getImageData(0, 0, 64, 64).data;
+			expect(next.some((value, index) => index % 4 === 0 && value > 0)).toBe(true);
+			expect(next).not.toEqual(first);
+		} finally {
+			renderer.dispose();
+		}
+	});
+
+	it('keeps timers and animated glyphs moving when their authored text is unchanged', async () => {
+		const project = sourceProject();
+		project.timeline!.items = [
+			{
+				id: 'timer',
+				type: 'text',
+				trackId: 'v',
+				from: 0,
+				durationInFrames: 60,
+				label: 'Timer',
+				fontFamily: 'sans-serif',
+				fontSize: 16,
+				color: '#ffffff',
+				timer: { style: 'numbers', format: 'seconds', direction: 'down' }
+			}
+		];
+		const timer = new TimelineFrameRenderer(project);
+		try {
+			const first = (await timer.render(0)).getContext('2d')!.getImageData(0, 0, 64, 64).data;
+			const later = (await timer.render(30)).getContext('2d')!.getImageData(0, 0, 64, 64).data;
+			expect(later).not.toEqual(first);
+		} finally {
+			timer.dispose();
+		}
+		project.timeline!.items[0] = {
+			...project.timeline!.items[0]!,
+			timer: undefined,
+			text: 'I',
+			textMotion: { in: { ...createTextMotionEffect('typewriter'), durationFrames: 20 } }
+		};
+		const motion = new TimelineFrameRenderer(project);
+		try {
+			const first = (await motion.render(0)).getContext('2d')!.getImageData(0, 0, 64, 64).data;
+			const last = (await motion.render(25)).getContext('2d')!.getImageData(0, 0, 64, 64).data;
+			expect(first.filter((_, index) => index % 4 === 0).some((red) => red > 0)).toBe(false);
+			expect(last.filter((_, index) => index % 4 === 0).some((red) => red > 0)).toBe(true);
+		} finally {
+			motion.dispose();
+		}
+	});
+
+	it('refreshes text after an already loaded font replaces another face', async () => {
+		const mono = await new FontFace(
+			'Raster test font',
+			'local("Courier New"), local("Liberation Mono"), local("DejaVu Sans Mono")'
+		).load();
+		const proportional = await new FontFace(
+			'Raster test font',
+			'local("Arial"), local("Liberation Sans"), local("DejaVu Sans")'
+		).load();
+		document.fonts.add(mono);
+		const project = sourceProject();
+		project.metadata.width = 256;
+		project.timeline!.items = [
+			{
+				id: 'title',
+				type: 'text',
+				trackId: 'v',
+				from: 0,
+				durationInFrames: 60,
+				label: 'Title',
+				fontFamily: 'Raster test font',
+				fontSize: 24,
+				color: '#ffffff',
+				text: 'iiiiiiii'
+			}
+		];
+		const renderer = new TimelineFrameRenderer(project);
+		const inkWidth = (canvas: OffscreenCanvas) => {
+			const pixels = canvas.getContext('2d')!.getImageData(0, 0, 256, 64).data;
+			const columns = new Set<number>();
+			for (let pixel = 0; pixel < pixels.length; pixel += 4)
+				if (pixels[pixel]! > 0) columns.add((pixel / 4) % 256);
+			return Math.max(...columns) - Math.min(...columns);
+		};
+		try {
+			const initial = inkWidth(await renderer.render(0));
+			document.fonts.delete(mono);
+			document.fonts.add(proportional);
+			const replaced = inkWidth(await renderer.render(1));
+			expect(initial).toBeGreaterThan(80);
+			expect(replaced).toBeLessThan(60);
+		} finally {
+			renderer.dispose();
+			document.fonts.delete(mono);
+			document.fonts.delete(proportional);
+		}
+	});
+
+	it('keeps both raster sources intact throughout a shape transition', async () => {
+		const project = sourceProject();
+		project.timeline!.items = ['#ff0000', '#0000ff'].map((fillColor, index) => ({
+			id: `shape-${index}`,
+			type: 'shape',
+			trackId: 'v',
+			from: index * 30,
+			durationInFrames: 30,
+			label: 'Shape',
+			shapeType: 'rectangle',
+			fillColor,
+			transform: { width: 64, height: 64 }
+		}));
+		project.timeline!.transitions = [
+			{
+				id: 'dissolve',
+				type: 'crossfade',
+				presentation: 'dissolve',
+				timing: 'linear',
+				durationInFrames: 21,
+				fromItemId: 'shape-0',
+				toItemId: 'shape-1'
+			}
+		];
+		const renderer = new TimelineFrameRenderer(project);
+		try {
+			for (const [frame, expected] of [
+				[20, [255, 0, 0, 255]],
+				[30, [128, 0, 128, 255]],
+				[40, [0, 0, 255, 255]]
+			] as const) {
+				const canvas = await renderer.render(frame);
+				const pixel = canvas.getContext('2d')!.getImageData(32, 32, 1, 1).data;
+				for (let channel = 0; channel < 4; channel++) {
+					expect(
+						Math.abs(pixel[channel]! - expected[channel]!),
+						`frame ${frame}, channel ${channel}`
+					).toBeLessThanOrEqual(3);
+				}
+			}
+		} finally {
+			renderer.dispose();
+		}
+	});
+
+	it('releases the submitted frame when the encoder rejects an export', async () => {
+		const project = sourceProject();
+		project.timeline!.items = [
+			{
+				id: 'background',
+				type: 'background',
+				trackId: 'v',
+				from: 0,
+				durationInFrames: 1,
+				label: 'Background'
+			}
+		];
+		let submitted: VideoSample | undefined;
+		vi.spyOn(VideoSampleSource.prototype, 'add').mockImplementation(async (sample) => {
+			submitted = sample;
+			throw new Error('Encoder failed');
+		});
+		await expect(renderMultiTrackVideoArtifact(project)).rejects.toThrow('Encoder failed');
+		expect(submitted).toBeDefined();
+		expect(() => submitted!.toVideoFrame()).toThrow(/closed/i);
+	});
+
+	it('keeps simultaneous uses of a source independent and releases inactive decoders', async () => {
+		const blob = await sourceVideo();
+		const url = URL.createObjectURL(blob);
+		mediaPool.upsert(
+			{
+				id: 'source',
+				storageType: 'cloud',
+				remoteUrl: url,
+				fileName: 'source.mp4',
+				fileSize: blob.size,
+				mimeType: blob.type,
+				duration: 2,
+				width: 64,
+				height: 64,
+				fps: FPS,
+				codec: 'avc',
+				bitrate: 1_000_000,
+				tags: []
+			},
+			'ready'
+		);
+		const project = sourceProject();
+		const timeline = project.timeline!;
+		const first = timeline.items[0]!;
+		first.transform = { x: -16, width: 32, height: 64 };
+		timeline.tracks.push({ ...timeline.tracks[0]!, id: 'v2', order: 1 });
+		timeline.items.push({
+			...first,
+			id: 'second',
+			trackId: 'v2',
+			sourceStart: 30,
+			durationInFrames: 30,
+			transform: { x: 16, width: 32, height: 64 }
+		});
+		const configure = vi.spyOn(VideoDecoder.prototype, 'configure');
+		const close = vi.spyOn(VideoDecoder.prototype, 'close');
+		const dispose = vi.spyOn(ResilientVideoFrameDecoder.prototype, 'dispose');
+		const fetchSource = vi.spyOn(globalThis, 'fetch');
+		const renderer = new TimelineFrameRenderer(project);
+		try {
+			for (let frame = 0; frame < 30; frame++) {
+				const canvas = await renderer.render(frame);
+				const context = canvas.getContext('2d')!;
+				expect(Math.abs(context.getImageData(16, 32, 1, 1).data[0]! - frame * 4)).toBeLessThan(5);
+				expect(
+					Math.abs(context.getImageData(48, 32, 1, 1).data[0]! - (frame + 30) * 4)
+				).toBeLessThan(5);
+			}
+			expect(configure.mock.calls.length).toBeLessThanOrEqual(4);
+			expect(fetchSource.mock.calls.filter(([request]) => request === url)).toHaveLength(1);
+			// Frame 32 is past the second clip's 30-frame range but still inside the
+			// first clip. The renderer must release the inactive decoder before its own
+			// dispose, while the still-active source keeps rendering real frames.
+			const disposesBeforeRelease = dispose.mock.calls.length;
+			const closesBeforeRelease = close.mock.calls.length;
+			await renderer.render(32);
+			await vi.waitFor(() =>
+				expect(dispose.mock.calls.length).toBeGreaterThan(disposesBeforeRelease)
+			);
+			await vi.waitFor(() => expect(close.mock.calls.length).toBeGreaterThan(closesBeforeRelease));
+			const activeFrame = (await renderer.render(33)).getContext('2d')!;
+			expect(Math.abs(activeFrame.getImageData(8, 32, 1, 1).data[0]! - 33 * 4)).toBeLessThan(5);
+			renderer.dispose();
+			await vi.waitFor(() => expect(close.mock.calls.length).toBe(configure.mock.calls.length));
+		} finally {
+			renderer.dispose();
+			dispose.mockRestore();
+			URL.revokeObjectURL(url);
+		}
+	});
+	it('releases finished nested compositions before the export ends', async () => {
+		const blob = await sourceVideo();
+		const url = URL.createObjectURL(blob);
+		mediaPool.upsert(
+			{
+				id: 'source',
+				storageType: 'cloud',
+				remoteUrl: url,
+				fileName: 'source.mp4',
+				fileSize: blob.size,
+				mimeType: blob.type,
+				duration: 2,
+				width: 64,
+				height: 64,
+				fps: FPS,
+				codec: 'avc',
+				bitrate: 1_000_000,
+				tags: []
+			},
+			'ready'
+		);
+		const project = sourceProject();
+		const timeline = project.timeline!;
+		const source = timeline.items[0]!;
+		timeline.compositions = [
+			{
+				id: 'nested',
+				name: 'Nested recording',
+				items: [source],
+				tracks: timeline.tracks,
+				transitions: [],
+				fps: FPS,
+				width: 64,
+				height: 64,
+				durationInFrames: FRAME_COUNT
+			}
+		];
+		timeline.items = [0, 1, 2].map((index) => ({
+			id: `nested-${index}`,
+			type: 'composition',
+			trackId: 'v',
+			label: 'Nested recording',
+			compositionId: 'nested',
+			from: index * 10,
+			durationInFrames: 10,
+			sourceFps: FPS
+		}));
+		const configure = vi.spyOn(VideoDecoder.prototype, 'configure');
+		const close = vi.spyOn(VideoDecoder.prototype, 'close');
+		const renderer = new TimelineFrameRenderer(project);
+		try {
+			for (let frame = 0; frame < 30; frame++) {
+				const canvas = await renderer.render(frame);
+				const red = canvas.getContext('2d')!.getImageData(32, 32, 1, 1).data[0]!;
+				expect(Math.abs(red - (frame % 10) * 4)).toBeLessThan(5);
+			}
+			await vi.waitFor(() =>
+				expect(configure.mock.calls.length - close.mock.calls.length).toBeLessThanOrEqual(1)
+			);
+			await renderer.render(30);
+			await vi.waitFor(() => expect(close.mock.calls.length).toBe(configure.mock.calls.length));
+		} finally {
+			renderer.dispose();
+			URL.revokeObjectURL(url);
+		}
+	});
+	it('prepares proxies with frequent seek points while preserving source frames and timing', async () => {
+		const blob = await sourceVideo();
+		const url = URL.createObjectURL(blob);
+		const media = {
+			id: 'proxy-source',
+			storageType: 'cloud' as const,
+			remoteUrl: url,
+			fileName: 'source.mp4',
+			fileSize: blob.size,
+			mimeType: blob.type,
+			duration: 2,
+			width: 64,
+			height: 64,
+			fps: FPS,
+			codec: 'avc',
+			bitrate: 1_000_000,
+			tags: []
+		};
+		let input: Input | undefined;
+		try {
+			input = new Input({ source: new BlobSource(await getProxy(media)), formats: ALL_FORMATS });
+			const track = (await input.getPrimaryVideoTrack())!;
+			const packets = new EncodedPacketSink(track);
+			expect((await packets.getKeyPacket(1.5))!.timestamp).toBeGreaterThanOrEqual(1.2);
+			expect(Math.abs((await track.computeDuration()) - 2)).toBeLessThan(1 / FPS + 0.001);
+			let count = 0;
+			for await (const frame of new CanvasSink(track, { poolSize: 1 }).canvases()) {
+				const red = frame.canvas.getContext('2d')!.getImageData(32, 32, 1, 1).data[0]!;
+				expect(Math.abs(red - count * 4)).toBeLessThan(8);
+				expect(frame.timestamp).toBeCloseTo(count / FPS, 3);
+				count++;
+			}
+			expect(count).toBe(FRAME_COUNT);
+		} finally {
+			input?.dispose();
+			clearProxyCache(media.id);
+			URL.revokeObjectURL(url);
+		}
+	});
+	it.each([
+		{ isReversed: false, sourceStep: 1 },
+		{ isReversed: true, sourceStep: 1 },
+		{ isReversed: false, sourceStep: 2 },
+		{ isReversed: true, sourceStep: 2 },
+		{ isReversed: true, sourceStep: 1, ramped: true }
+	])(
+		'reuses decoding and draws requested frames, reversed=$isReversed, source step=$sourceStep, ramped=$ramped',
+		async ({ isReversed, sourceStep, ramped }) => {
+			const blob = await sourceVideo();
+			const url = URL.createObjectURL(blob);
+			mediaPool.upsert(
+				{
+					id: 'source',
+					storageType: 'cloud',
+					remoteUrl: url,
+					fileName: 'source.mp4',
+					fileSize: blob.size,
+					mimeType: blob.type,
+					duration: 2,
+					width: 64,
+					height: 64,
+					fps: FPS,
+					codec: 'avc',
+					bitrate: 1_000_000,
+					tags: []
+				},
+				'ready'
+			);
+			const project = sourceProject(isReversed);
+			project.metadata.fps = FPS / sourceStep;
+			const outputFrames = ramped ? 45 : FRAME_COUNT / sourceStep;
+			const clip = project.timeline!.items[0]!;
+			clip.durationInFrames = outputFrames;
+			if (ramped) {
+				clip.sourceEnd = FRAME_COUNT;
+				clip.speedRamp = [
+					{ id: 'normal', sourceFrame: 0, speed: 1, easing: 'hold' },
+					{ id: 'fast', sourceFrame: 15, speed: 2, easing: 'hold' },
+					{ id: 'slow', sourceFrame: 45, speed: 1, easing: 'hold' },
+					{ id: 'end', sourceFrame: 60, speed: 1, easing: 'linear' }
+				];
+			}
+			const expectedSourceFrame = (frame: number): number => {
+				if (ramped) {
+					if (frame < 15) return 59 - frame;
+					if (frame < 30) return 74 - frame * 2;
+					return 44 - frame;
+				}
+				return isReversed ? FRAME_COUNT - 1 - frame * sourceStep : frame * sourceStep;
+			};
+			const draw = vi.spyOn(VideoSample.prototype, 'drawWithFit');
+			const configure = vi.spyOn(VideoDecoder.prototype, 'configure');
+			const renderer = new TimelineFrameRenderer(project);
+			try {
+				for (let frame = 0; frame < outputFrames; frame++) {
+					const canvas = await renderer.render(frame);
+					expect(frameIdentity(canvas)).toBe(expectedSourceFrame(frame));
+				}
+				// A clip must not repeatedly decode its preceding keyframe group during export.
+				expect(configure.mock.calls.length).toBeLessThanOrEqual(4);
+				expect(draw.mock.calls.length).toBeLessThanOrEqual(outputFrames);
+				for (const frame of [8, 9, 9, outputFrames - 1, 2, 3]) {
+					const canvas = await renderer.render(frame);
+					expect(frameIdentity(canvas)).toBe(expectedSourceFrame(frame));
+				}
+			} finally {
+				renderer.dispose();
+				URL.revokeObjectURL(url);
+			}
+		}
+	);
+});

@@ -1,0 +1,18 @@
+appId: com.openpost.app
+---
+# A fresh iOS 26.2 simulator can foreground the Apple Intelligence & Siri
+# settings page mid-flow and push OpenPost to the background. Returning to the
+# app continues the capture without changing any screenshot step.
+- runFlow:
+    when:
+      visible: Apple Intelligence & Siri
+    commands:
+      - launchApp
+      - waitForAnimationToEnd
+      # The takeover page can return once before the system settles.
+      - runFlow:
+          when:
+            visible: Apple Intelligence & Siri
+          commands:
+            - launchApp
+            - waitForAnimationToEnd

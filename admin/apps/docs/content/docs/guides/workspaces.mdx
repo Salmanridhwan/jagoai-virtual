@@ -1,0 +1,40 @@
+---
+title: Workspaces and settings
+description: Keep accounts, content, media, and access separated by workspace.
+icon: PanelsTopLeft
+---
+
+A workspace keeps its posts, accounts, schedule, media, and members together. Choose the workspace from the switcher before you connect an account, write a post, or inspect results. The switcher marks the current workspace; if a post seems missing, check that selection first.
+
+## Invite someone
+
+Open **Workspace settings → Members**. As an admin, enter the teammate's email, choose a role, then select **Send invite**. The page shows a link you can copy after the invitation is created. Share it directly if email delivery is unavailable. The teammate must accept the invitation before they appear as a member.
+
+Choose the role for what they need to do in this workspace:
+
+| Role   | Access                                                      |
+| ------ | ----------------------------------------------------------- |
+| Admin  | Manage workspace access and settings                        |
+| Editor | Create and manage workspace content                         |
+| Client | View content, connect accounts, and decide assigned reviews |
+| Viewer | View workspace content and settings                         |
+
+Check **Invitations** to see whether the invitation is still waiting. An admin can resend or revoke it, and can change or remove a member's access later. Removing a member does not delete the workspace's posts.
+
+## Find settings
+
+Use **Workspace settings** for members and connected accounts. Your profile menu holds personal sign-in and notification preferences. If you manage a self-hosted deployment, instance settings are separate from any one workspace.
+
+## Send a post to a client
+
+Client review is optional. Your usual draft and publishing flow stays the same until you explicitly send a post for review. The deployment must support client reviews, and the workspace must have an active client member.
+
+1. Open a draft and finish its text, destination variants, media and provider settings.
+2. Open the composer settings, select **Send to client**, choose the client, and add an optional note.
+3. Check the submitted version and send it. The post now requires that client's approval before publishing.
+4. The client opens the notification, reviews the submitted version, and chooses **Approve this version** or **Request changes**. Requesting changes requires feedback.
+5. After approval, the author schedules or publishes the post. Approval itself never publishes it.
+
+Editing submitted content requires another review. If the post was queued, the edit removes its pending delivery jobs and returns it to a draft. If you submitted a date, changing that date also requires another review. If you submitted no date, you can choose the first schedule after approval.
+
+The review history keeps the submitted versions and decisions. Removing or changing the assigned client's role prevents further publishing under that approval. Automatic reposts of reviewed posts are disabled; create a separate post for a new placement. Inbox replies remain separate conversation actions.

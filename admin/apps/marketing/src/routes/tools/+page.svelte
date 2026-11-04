@@ -1,0 +1,356 @@
+<script lang="ts">
+	import { ArrowRight, Search, ShieldCheck } from '@lucide/svelte';
+	import { Input } from '@openpost/ui/components/input';
+	import { Button } from '@openpost/ui/components/button';
+	import HeroAccent from '../_components/HeroAccent.svelte';
+	import ToolThumbnail from './ToolThumbnail.svelte';
+	import { tools, getToolCategory } from '../_marketing';
+
+	const categories = [
+		'All tools',
+		'Images',
+		'Video',
+		'Audio',
+		'Previews',
+		'Convert',
+		'Writing & planning',
+		'Extensions'
+	] as const;
+	type Category = (typeof categories)[number];
+	let category = $state<Category>('All tools');
+	let query = $state('');
+	const summaries = new Map([
+		['background-remover', 'Erase the background and download a transparent PNG.'],
+		['image-color-picker', 'Pick a color, copy its code, or extract a palette.'],
+		['paste-image', 'Paste an image from your clipboard and download it as a file.'],
+		['logo-maker', 'Choose an icon and colors. Download your logo as PNG or SVG.'],
+		['quick-cut', 'Trim and join compatible video segments without re-encoding.'],
+		['image-converter', 'Convert PNG, JPEG, and WebP images at their original size.'],
+		['video-converter', 'Change video containers and codecs on your device.'],
+		['mp4-to-mkv', 'Move compatible MP4 tracks into a Matroska container.'],
+		['mkv-to-mp4', 'Save the primary MKV tracks in an MP4 container.'],
+		['mp4-to-webm', 'Convert a clip to WebM for web playback.'],
+		['webm-to-mp4', 'Save a WebM recording as MP4. Choose compatible codecs.'],
+		['mov-to-mp4', 'Convert a supported camera or editing file to MP4.'],
+		['video-codec-converter', 'Choose a video codec and bitrate supported by your device.'],
+		['video-compressor', 'Reduce bitrate or resolution and compare the file size.'],
+		['remove-audio-from-video', 'Remove the soundtrack and download a silent clip.'],
+		['audio-converter', 'Change audio formats and choose output quality.'],
+		['mp3-to-wav', 'Decode compressed audio to WAV for editing.'],
+		['wav-to-mp3', 'Make a smaller MP3 copy of uncompressed audio.'],
+		['m4a-to-mp3', 'Convert supported M4A audio to MP3.'],
+		['mp3-to-m4a', 'Re-encode MP3 audio to AAC in an M4A file.'],
+		['flac-to-mp3', 'Make a smaller MP3 delivery copy of lossless audio.'],
+		['flac-to-wav', 'Decode FLAC audio to uncompressed WAV.'],
+		['ogg-to-mp3', 'Convert Ogg audio for players that need MP3.'],
+		['extract-audio-from-video', 'Save a video soundtrack as an audio file.'],
+		['media-info', 'Check codecs, dimensions, duration and audio channels.']
+	]);
+	const featured = [
+		'social-media-image-editor',
+		'social-media-video-editor',
+		'post-preview-generator'
+	];
+	const directoryTools = [...tools].sort(
+		(a, b) => Number(featured.includes(b.slug)) - Number(featured.includes(a.slug))
+	);
+	const filtered = $derived(
+		directoryTools.filter(
+			(tool) =>
+				(category === 'All tools' || getToolCategory(tool.slug) === category) &&
+				`${tool.name} ${tool.slug.replaceAll('-', ' ')} ${tool.description} ${summaries.get(tool.slug) ?? ''}`
+					.toLowerCase()
+					.includes(query.trim().toLowerCase())
+		)
+	);
+</script>
+
+<section class="tools-directory marketing-shell" aria-labelledby="tools-title">
+	<header>
+		<h1 id="tools-title" class="marketing-title">
+			Free tools.<br /><HeroAccent>For your next post.</HeroAccent>
+		</h1>
+		<p class="intro">
+			Preview a post, split a thread, format LinkedIn text, or edit your media. Start with a tool,
+			then continue your draft in OpenPost when you are ready to publish.
+		</p>
+		<p class="privacy">
+			<ShieldCheck size={18} aria-hidden="true" /> No account required. Media tools run on your device,
+			with no watermark or paid download.
+		</p>
+	</header>
+	<div class="directory-controls">
+		<div class="search-field">
+			<Search size={18} aria-hidden="true" /><Input
+				aria-label="Search free tools"
+				type="search"
+				bind:value={query}
+				placeholder="Search tools, formats, or tasks"
+			/>
+		</div>
+		<div class="categories" role="group" aria-label="Filter tools by category">
+			{#each categories as item (item)}
+				<Button
+					class="focus-ring"
+					variant={category === item ? 'secondary' : 'ghost'}
+					aria-pressed={category === item}
+					onclick={() => (category = item)}>{item}</Button
+				>
+			{/each}
+		</div>
+	</div>
+	<p class="result-count" role="status">
+		{filtered.length}
+		{filtered.length === 1 ? 'tool' : 'tools'}
+	</p>
+	{#each categories.slice(1) as group (group)}
+		{@const entries = filtered.filter((tool) => getToolCategory(tool.slug) === group)}
+		{#if entries.length}
+			<section
+				class="tool-group"
+				id={group === 'Extensions' ? 'extensions' : undefined}
+				aria-label={group}
+			>
+				<h2>{group === 'Convert' ? 'Image converters' : group}</h2>
+				<div
+					class="tool-grid"
+					class:extension-grid={group === 'Extensions'}
+					class:illustrated={['Images', 'Video', 'Audio', 'Convert', 'Extensions'].includes(group)}
+				>
+					{#each entries as tool (tool.slug)}
+						<a class="tool-card focus-ring" href={`/tools/${tool.slug}`}>
+							<div class="tool-visual"><ToolThumbnail slug={tool.slug} /></div>
+							<div class="tool-copy">
+								<h3>{tool.name}</h3>
+								<p>
+									{summaries.get(tool.slug) ??
+										(group === 'Convert'
+											? 'Change formats without resizing your image.'
+											: tool.description)}
+								</p>
+							</div>
+							<ArrowRight class="tool-arrow" size={18} aria-hidden="true" />
+						</a>
+					{/each}
+				</div>
+			</section>
+		{/if}
+	{/each}
+	{#if !filtered.length}
+		<div class="empty">
+			<h2>No tools match that search.</h2>
+			<p>Try a format such as PNG, or choose another category.</p>
+			<Button
+				variant="outline"
+				onclick={() => {
+					query = '';
+					category = 'All tools';
+				}}>Show all tools</Button
+			>
+		</div>
+	{/if}
+</section>
+
+<style>
+	.tools-directory {
+		padding-block: 48px 80px;
+	}
+	header {
+		max-width: 800px;
+		padding-bottom: 36px;
+	}
+	.intro {
+		margin-top: 24px;
+		max-width: 62ch;
+		color: var(--muted-foreground);
+		font-size: 18px;
+		line-height: 1.6;
+	}
+	.privacy {
+		display: flex;
+		align-items: start;
+		gap: 8px;
+		margin-top: 20px;
+		color: var(--muted-foreground);
+		font-size: 14px;
+		line-height: 1.6;
+	}
+	.privacy :global(svg) {
+		flex-shrink: 0;
+		margin-top: 2px;
+	}
+	.directory-controls {
+		border-block: 1px solid var(--border);
+		padding-block: 20px;
+		display: grid;
+		gap: 16px;
+	}
+	.search-field {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		max-width: 520px;
+	}
+	.search-field :global(svg) {
+		flex-shrink: 0;
+		color: var(--muted-foreground);
+	}
+	.categories {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+	}
+	.categories :global(button:focus-visible) {
+		outline: 2px solid var(--ring);
+		outline-offset: 4px;
+	}
+	.result-count {
+		margin-block: 16px 28px;
+		font-size: 13px;
+		color: var(--muted-foreground);
+	}
+	.tool-group {
+		margin-bottom: 48px;
+	}
+	.tool-group > h2 {
+		font-size: 23px;
+		letter-spacing: -0.02em;
+		font-weight: 600;
+		margin-bottom: 20px;
+	}
+	.tool-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+		gap: 16px;
+	}
+	.tool-card {
+		display: grid;
+		grid-template-columns: 88px minmax(0, 1fr);
+		align-content: start;
+		align-items: start;
+		gap: 16px;
+		position: relative;
+		padding: 20px;
+		border: 1px solid var(--border);
+		border-radius: 12px;
+		background: var(--background);
+	}
+	.tool-card:hover {
+		background: var(--marketing-section);
+		border-color: var(--muted-foreground);
+	}
+	.tool-visual {
+		height: 72px;
+		overflow: hidden;
+		border-radius: 8px;
+	}
+	.tool-copy {
+		min-width: 0;
+	}
+	.tool-card h3 {
+		font-size: 17px;
+		font-weight: 600;
+		line-height: 1.35;
+		text-wrap: pretty;
+	}
+	.tool-card p {
+		margin-top: 6px;
+		font-size: 14px;
+		line-height: 1.6;
+		color: var(--muted-foreground);
+	}
+	.tool-card :global(.tool-arrow) {
+		display: none;
+	}
+	.illustrated .tool-card {
+		display: flex;
+		flex-direction: column;
+		padding: 0;
+		gap: 0;
+	}
+	.illustrated .tool-visual {
+		width: 100%;
+		height: 176px;
+		border-radius: 11px 11px 0 0;
+	}
+	.illustrated .tool-copy {
+		padding: 20px 44px 20px 20px;
+	}
+	.illustrated :global(.tool-arrow) {
+		display: block;
+		position: absolute;
+		right: 20px;
+		top: 198px;
+	}
+	@media (min-width: 1000px) {
+		.tool-grid {
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+		}
+	}
+	@media (max-width: 599px) {
+		.tool-grid {
+			grid-template-columns: 1fr;
+			gap: 12px;
+		}
+		.tool-card,
+		.illustrated .tool-card {
+			display: grid;
+			grid-template-columns: 64px minmax(0, 1fr);
+			padding: 16px;
+			gap: 12px;
+		}
+		.tool-visual,
+		.illustrated .tool-visual {
+			height: 64px;
+			width: 64px;
+			border-radius: 6px;
+		}
+		.illustrated .tool-copy {
+			padding: 0;
+		}
+		.illustrated :global(.tool-arrow) {
+			display: none;
+		}
+		.tool-card h3 {
+			font-size: 16px;
+		}
+	}
+	.extension-grid {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+	.extension-grid :global(.tool-arrow) {
+		top: 302px;
+	}
+	.extension-grid .tool-visual {
+		height: 280px;
+	}
+	@media (max-width: 599px) {
+		.extension-grid {
+			grid-template-columns: 1fr;
+		}
+		.extension-grid .tool-card {
+			display: flex;
+			padding: 0;
+			gap: 0;
+		}
+		.extension-grid .tool-visual {
+			width: 100%;
+			height: 200px;
+			border-radius: 11px 11px 0 0;
+		}
+		.extension-grid .tool-copy {
+			padding: 20px;
+		}
+	}
+	.empty {
+		padding-block: 32px;
+	}
+	.empty h2 {
+		font-size: 22px;
+		font-weight: 600;
+	}
+	.empty p {
+		margin-block: 12px 24px;
+		color: var(--muted-foreground);
+	}
+</style>

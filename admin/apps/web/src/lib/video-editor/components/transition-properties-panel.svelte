@@ -1,0 +1,471 @@
+<script lang="ts">
+	import { m } from '$lib/paraglide/messages';
+	import { Button } from '$lib/components/ui/button';
+	import { Input } from '$lib/components/ui/input';
+	import {
+		Disclosure as EditorDisclosure,
+		EditorMenu,
+		SliderRow
+	} from '$lib/components/editor-density';
+	import ColorPicker from '$lib/components/color-picker.svelte';
+	import { ThemeIcon } from '$lib/themes/icons';
+	import type {
+		TimelineTransition,
+		TransitionDirection,
+		TransitionPropertyValue,
+		TransitionTiming
+	} from '$lib/video-editor/project/types';
+	import {
+		removeTransition,
+		transitionsStore,
+		updateTransition,
+		updateTransitionPresentation
+	} from '$lib/video-editor/timeline/actions/transitions.svelte';
+	import { timelineStore } from '$lib/video-editor/timeline/stores/timeline-store.svelte';
+	import { getMaxTransitionDuration } from '$lib/video-editor/timeline/transition-planner';
+	import { transitionRegistry } from '$lib/video-editor/transitions';
+	import { defaultTransitionProperties } from '$lib/video-editor/transitions/default-properties';
+	import { localizedTransitionLabel } from '$lib/video-editor/transitions/labels';
+	import type {
+		TransitionCategory,
+		TransitionDefinition,
+		TransitionParameterDefinition
+	} from '$lib/video-editor/transitions/types';
+
+	let {
+		transitionId,
+		onedit,
+		onremove = () => {}
+	}: {
+		transitionId: string;
+		onedit: () => void;
+		onremove?: () => void;
+	} = $props();
+
+	let search = $state('');
+	const transition = $derived(
+		transitionsStore.list.find((candidate) => candidate.id === transitionId)
+	);
+	const definition = $derived(
+		transitionRegistry.getDefinition(transition?.presentation ?? 'fade') ??
+			transitionRegistry.getDefinition('fade')
+	);
+	const definitions = transitionRegistry.getDefinitions();
+	const categories = [
+		'basic',
+		'dissolve',
+		'motion',
+		'wipe',
+		'slide',
+		'flip',
+		'mask',
+		'iris',
+		'shape',
+		'light',
+		'chromatic',
+		'custom'
+	] satisfies TransitionCategory[];
+
+	const parameterLabels = {
+		Blur: m.video_editor_transition_parameter_blur,
+		Blocks: m.video_editor_transition_parameter_blocks,
+		Burn: m.video_editor_transition_parameter_burn,
+		Chroma: m.video_editor_transition_parameter_chroma,
+		Color: m.video_editor_transition_parameter_color,
+		Density: m.video_editor_transition_parameter_density,
+		Dim: m.video_editor_transition_parameter_dim,
+		Exposure: m.video_editor_transition_parameter_exposure,
+		'Gate Width': m.video_editor_transition_parameter_gate_width,
+		Glow: m.video_editor_transition_parameter_glow,
+		Grain: m.video_editor_transition_parameter_grain,
+		Intensity: m.video_editor_transition_parameter_intensity,
+		'Block Size': m.video_editor_transition_parameter_block_size,
+		'RGB Split': m.video_editor_transition_parameter_rgb_split,
+		Roll: m.video_editor_transition_parameter_roll,
+		Scale: m.video_editor_transition_parameter_scale,
+		Shake: m.video_editor_transition_parameter_shake,
+		Shine: m.video_editor_transition_parameter_shine,
+		Size: m.video_editor_transition_parameter_size,
+		Slip: m.video_editor_transition_parameter_slip,
+		Softness: m.video_editor_transition_parameter_softness,
+		Spin: m.video_editor_transition_parameter_spin,
+		Spread: m.video_editor_transition_parameter_spread,
+		Strength: m.video_editor_transition_parameter_strength,
+		Swirl: m.video_editor_transition_parameter_swirl,
+		Turbulence: m.video_editor_transition_parameter_turbulence,
+		Vignette: m.video_editor_transition_parameter_vignette,
+		Warmth: m.video_editor_transition_parameter_warmth,
+		Warp: m.video_editor_transition_parameter_warp,
+		Zoom: m.video_editor_transition_parameter_zoom
+	};
+
+	function transitionLabel(item: TransitionDefinition): string {
+		return localizedTransitionLabel(item.id, item.label);
+	}
+
+	function categoryLabel(category: TransitionCategory): string {
+		const labels = {
+			basic: m.video_editor_transition_category_basic,
+			dissolve: m.video_editor_transition_category_dissolve,
+			motion: m.video_editor_transition_category_motion,
+			wipe: m.video_editor_transition_category_wipe,
+			slide: m.video_editor_transition_category_slide,
+			flip: m.video_editor_transition_category_flip,
+			mask: m.video_editor_transition_category_mask,
+			iris: m.video_editor_transition_category_iris,
+			// oxlint-disable-next-line anti-slop/no-shape-in-symbol-names -- Message key matches the transition domain category.
+			shape: m.video_editor_transition_category_shape,
+			light: m.video_editor_transition_category_light,
+			chromatic: m.video_editor_transition_category_chromatic,
+			custom: m.video_editor_transition_category_custom
+		};
+		return labels[category]();
+	}
+
+	function parameterLabel(parameter: TransitionParameterDefinition): string {
+		// SAFETY: Registry labels outside this closed localization map use their own fallback label.
+		const key = parameter.label as keyof typeof parameterLabels;
+		return parameterLabels[key]?.() ?? parameter.label;
+	}
+
+	function filteredDefinitions(category: TransitionCategory): TransitionDefinition[] {
+		const query = search.trim().toLocaleLowerCase();
+		return definitions.filter(
+			(candidate) =>
+				candidate.category === category &&
+				(!query ||
+					[
+						candidate.id,
+						transitionLabel(candidate),
+						candidate.description,
+						candidate.category,
+						categoryLabel(candidate.category),
+						...(candidate.directions ?? [])
+					]
+						.filter(Boolean)
+						.some((value) => String(value).toLocaleLowerCase().includes(query)))
+		);
+	}
+	const hasFilteredResults = $derived(
+		categories.some((category) => filteredDefinitions(category).length > 0)
+	);
+	const durationResetValue = $derived.by(() => {
+		if (!transition || !definition) return 1;
+		const available = maxDuration(transition);
+		return Math.max(
+			definition.minDuration,
+			Math.min(available, definition.maxDuration, definition.defaultDuration)
+		);
+	});
+
+	function pairFor(current: TimelineTransition) {
+		const outgoing = timelineStore.itemById.get(current.fromItemId);
+		const incoming = timelineStore.itemById.get(current.toItemId);
+		return outgoing && incoming ? { outgoing, incoming } : null;
+	}
+
+	function maxDuration(current: TimelineTransition, alignment = current.alignment ?? 0.5): number {
+		const pair = pairFor(current);
+		if (!pair) return current.durationInFrames;
+		return getMaxTransitionDuration(pair.outgoing, pair.incoming, alignment, timelineStore.fps);
+	}
+
+	function commit(updates: Parameters<typeof updateTransition>[1]): void {
+		if (updateTransition(transitionId, updates)) onedit();
+	}
+
+	function choosePresentation(nextDefinition: TransitionDefinition): void {
+		if (updateTransitionPresentation(transitionId, nextDefinition.id)) onedit();
+	}
+
+	function setPlacement(alignment: number): void {
+		if (!transition) return;
+		if (maxDuration(transition, alignment) < transition.durationInFrames) return;
+		commit({ alignment });
+	}
+
+	function propertyValue(parameter: TransitionParameterDefinition): TransitionPropertyValue {
+		return transition?.properties?.[parameter.key] ?? parameter.defaultValue;
+	}
+
+	function setProperty(
+		parameter: TransitionParameterDefinition,
+		value: TransitionPropertyValue
+	): void {
+		if (!transition) return;
+		commit({ properties: { ...transition.properties, [parameter.key]: value } });
+	}
+
+	function parameterAtDefault(parameter: TransitionParameterDefinition): boolean {
+		return JSON.stringify(propertyValue(parameter)) === JSON.stringify(parameter.defaultValue);
+	}
+
+	function resetProperty(parameter: TransitionParameterDefinition): void {
+		// SAFETY: Transition array defaults are already validated against the parameter schema.
+		const value = Array.isArray(parameter.defaultValue)
+			? ([...parameter.defaultValue] as TransitionPropertyValue)
+			: parameter.defaultValue;
+		setProperty(parameter, value);
+	}
+
+	function rgbToHex(value: TransitionPropertyValue): string {
+		if (!Array.isArray(value)) return '#000000';
+		return `#${value
+			.map((channel) =>
+				Math.round(Math.min(1, Math.max(0, channel)) * 255)
+					.toString(16)
+					.padStart(2, '0')
+			)
+			.join('')}`;
+	}
+
+	function hexToRgb(value: string): [number, number, number] {
+		return [
+			Number.parseInt(value.slice(1, 3), 16) / 255,
+			Number.parseInt(value.slice(3, 5), 16) / 255,
+			Number.parseInt(value.slice(5, 7), 16) / 255
+		];
+	}
+
+	function remove(): void {
+		removeTransition(transitionId);
+		onedit();
+		onremove();
+	}
+
+	const timingOptions = $derived(
+		(definition?.supportedTimings ?? ['linear']).map((timing) => ({
+			value: timing,
+			label:
+				timing === 'ease-in'
+					? m.video_editor_keyframe_easing_in()
+					: timing === 'ease-out'
+						? m.video_editor_keyframe_easing_out()
+						: timing === 'ease-in-out'
+							? m.video_editor_keyframe_easing_in_out()
+							: timing === 'cubic-bezier'
+								? m.video_editor_keyframe_easing_bezier()
+								: m.video_editor_keyframe_easing_linear()
+		}))
+	);
+
+	const directionOptions = [
+		{ value: 'from-left', label: m.video_editor_transition_direction_from_left() },
+		{ value: 'from-right', label: m.video_editor_transition_direction_from_right() },
+		{ value: 'from-top', label: m.video_editor_transition_direction_from_top() },
+		{ value: 'from-bottom', label: m.video_editor_transition_direction_from_bottom() }
+	];
+</script>
+
+{#if transition && definition}
+	<section class="flex flex-col gap-2" aria-label={m.video_editor_transition_properties()}>
+		<h3 class="px-1 text-xs font-medium tracking-wide text-[var(--video-editor-muted)] uppercase">
+			{m.video_editor_transition_properties()}
+		</h3>
+
+		<details class="rounded border border-[var(--video-editor-border)]">
+			<summary
+				class="flex h-[25px] cursor-pointer items-center gap-1 px-1.5 text-[11px] text-[var(--video-editor-text)] [&::-webkit-details-marker]:hidden"
+			>
+				<ThemeIcon role="chevron-down" class="size-3 shrink-0" />
+				<span class="text-[var(--video-editor-muted)]">{m.video_editor_transition_preset()}</span>
+				<span class="ml-auto min-w-0 truncate font-mono text-[10px]"
+					>{transitionLabel(definition)}</span
+				>
+			</summary>
+			<div class="border-t border-[var(--video-editor-border)] p-1">
+				<Input
+					class="h-[25px] w-full bg-[var(--video-editor-control)] text-[11px]"
+					type="search"
+					placeholder={m.video_editor_transition_search()}
+					aria-label={m.video_editor_transition_search()}
+					bind:value={search}
+				/>
+				<div class="max-h-44 overflow-y-auto p-1">
+					{#if !hasFilteredResults}
+						<p class="p-2 text-xs text-[var(--video-editor-muted)]">
+							{m.video_editor_transition_no_results()}
+						</p>
+					{/if}
+					{#each categories as category}
+						{@const matches = filteredDefinitions(category)}
+						{#if matches.length > 0}
+							<h4
+								class="px-1 pt-1 text-[9px] font-semibold tracking-wide text-[var(--video-editor-muted)] uppercase"
+							>
+								{categoryLabel(category)}
+							</h4>
+							<div class="grid grid-cols-2 gap-1 py-1">
+								{#each matches as candidate (candidate.id)}
+									<button
+										type="button"
+										class="min-h-[25px] rounded px-1.5 py-1 text-left text-[10px] leading-tight hover:bg-[var(--video-editor-control-hover)] focus-visible:outline-2 focus-visible:outline-[var(--video-editor-focus)] data-[selected=true]:bg-[var(--video-editor-selection)] data-[selected=true]:text-[var(--video-editor-selection-text)]"
+										data-selected={candidate.id === definition.id}
+										aria-pressed={candidate.id === definition.id}
+										onclick={() => choosePresentation(candidate)}
+									>
+										{transitionLabel(candidate)}
+									</button>
+								{/each}
+							</div>
+						{/if}
+					{/each}
+				</div>
+			</div>
+		</details>
+
+		<SliderRow
+			label={m.video_editor_transition_duration()}
+			value={transition.durationInFrames}
+			min={Math.min(definition.minDuration, maxDuration(transition))}
+			max={Math.max(2, Math.min(definition.maxDuration, maxDuration(transition)))}
+			step={1}
+			precision={0}
+			suffix={m.video_editor_transition_frames()}
+			resetValue={durationResetValue}
+			resetLabel={m.video_editor_settings_reset()}
+			onValueChange={(value) => commit({ durationInFrames: Math.round(value) })}
+			onValueCommit={(value) => commit({ durationInFrames: Math.round(value) })}
+		/>
+
+		<fieldset>
+			<legend class="text-[10px] text-[var(--video-editor-muted)]">
+				{m.video_editor_transition_placement()}
+			</legend>
+			<div class="mt-1 grid grid-cols-3 gap-1">
+				{#each [{ value: 1, label: m.video_editor_transition_placement_outgoing() }, { value: 0.5, label: m.video_editor_transition_placement_center() }, { value: 0, label: m.video_editor_transition_placement_incoming() }] as placement (placement.value)}
+					{@const placementAvailable = maxDuration(transition, placement.value)}
+					<Button
+						size="sm"
+						variant={(transition.alignment ?? 0.5) === placement.value ? 'secondary' : 'outline'}
+						class="h-[25px] min-h-[25px] px-1 text-[9px] leading-tight"
+						disabled={placementAvailable < transition.durationInFrames}
+						onclick={() => setPlacement(placement.value)}
+					>
+						{placement.label}
+					</Button>
+				{/each}
+			</div>
+		</fieldset>
+
+		<div class="flex flex-col gap-1">
+			<span class="text-[10px] text-[var(--video-editor-muted)]"
+				>{m.video_editor_transition_timing()}</span
+			>
+			<EditorMenu
+				label={m.video_editor_transition_timing()}
+				value={transition.timing ?? 'linear'}
+				options={timingOptions}
+				onSelect={(value) => commit({ timing: value as TransitionTiming })}
+			/>
+		</div>
+
+		{#if transition.timing === 'cubic-bezier'}
+			<EditorDisclosure
+				label={m.video_editor_keyframe_easing_bezier()}
+				summary={`${(transition.bezierPoints?.x1 ?? 0.25).toFixed(2)}, ${(transition.bezierPoints?.y1 ?? 0.1).toFixed(2)}, ${(transition.bezierPoints?.x2 ?? 0.25).toFixed(2)}, ${(transition.bezierPoints?.y2 ?? 1).toFixed(2)}`}
+			>
+				<div class="grid grid-cols-4 gap-1 border-t border-[var(--video-editor-border)] p-1">
+					{#each ['x1', 'y1', 'x2', 'y2'] as point}
+						<label class="text-[9px] text-[var(--video-editor-muted)]">
+							{point}
+							<Input
+								class="mt-0.5 h-7 px-1 text-[10px]"
+								type="number"
+								min="0"
+								max="1"
+								step="0.01"
+								value={transition.bezierPoints?.[point as 'x1' | 'y1' | 'x2' | 'y2'] ??
+									(point === 'x1' ? 0.25 : point === 'y1' ? 0.1 : point === 'x2' ? 0.25 : 1)}
+								onchange={(event) =>
+									commit({
+										bezierPoints: {
+											x1: transition.bezierPoints?.x1 ?? 0.25,
+											y1: transition.bezierPoints?.y1 ?? 0.1,
+											x2: transition.bezierPoints?.x2 ?? 0.25,
+											y2: transition.bezierPoints?.y2 ?? 1,
+											[point]: Math.min(1, Math.max(0, event.currentTarget.valueAsNumber))
+										}
+									})}
+							/>
+						</label>
+					{/each}
+				</div>
+			</EditorDisclosure>
+		{/if}
+
+		{#if definition.hasDirection}
+			<div class="flex flex-col gap-1">
+				<span class="text-[10px] text-[var(--video-editor-muted)]"
+					>{m.video_editor_transition_direction()}</span
+				>
+				<EditorMenu
+					label={m.video_editor_transition_direction()}
+					value={transition.direction ?? definition.directions?.[0] ?? 'from-left'}
+					options={directionOptions.filter((option) =>
+						definition.directions?.includes(option.value as TransitionDirection)
+					)}
+					onSelect={(value) => commit({ direction: value as TransitionDirection })}
+				/>
+			</div>
+		{/if}
+
+		{#if definition.parameters?.length}
+			<div class="flex flex-col gap-2 border-t border-[var(--video-editor-border)] pt-2">
+				{#each definition.parameters as parameter (parameter.key)}
+					{#if parameter.type === 'color'}
+						<div class="flex items-end gap-1">
+							<ColorPicker
+								label={parameterLabel(parameter)}
+								value={rgbToHex(propertyValue(parameter))}
+								variant="swatch"
+								live={false}
+								onChange={(value) => setProperty(parameter, hexToRgb(value))}
+							/>
+							<Button
+								size="icon"
+								variant="ghost"
+								class="size-7 shrink-0"
+								disabled={parameterAtDefault(parameter)}
+								aria-label={m.video_editor_motion_override_reset({
+									name: parameterLabel(parameter)
+								})}
+								onclick={() => resetProperty(parameter)}
+							>
+								<ThemeIcon role="undo" class="size-3.5" />
+							</Button>
+						</div>
+					{:else}
+						<SliderRow
+							label={parameterLabel(parameter)}
+							value={propertyValue(parameter) as number}
+							min={parameter.min ?? 0}
+							max={parameter.max ?? 1}
+							step={parameter.step ?? 0.01}
+							precision={(parameter.step ?? 0.01) < 1 ? 2 : 0}
+							suffix={parameter.unit ?? ''}
+							resetValue={parameter.defaultValue as number}
+							resetLabel={m.video_editor_settings_reset()}
+							onValueChange={(value) => setProperty(parameter, value)}
+							onValueCommit={(value) => setProperty(parameter, value)}
+						/>
+					{/if}
+				{/each}
+				<Button
+					size="sm"
+					variant="ghost"
+					class="justify-start"
+					onclick={() => commit({ properties: defaultTransitionProperties(definition) })}
+				>
+					<ThemeIcon role="undo" class="size-3.5" />
+					{m.video_editor_transition_reset_parameters()}
+				</Button>
+			</div>
+		{/if}
+
+		<Button size="sm" variant="outline" class="mt-1 justify-start" onclick={remove}>
+			<ThemeIcon role="delete" class="size-3.5" />
+			{m.video_editor_transition_delete()}
+		</Button>
+	</section>
+{/if}

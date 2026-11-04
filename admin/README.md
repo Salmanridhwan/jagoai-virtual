@@ -1,0 +1,213 @@
+<p align="center">
+  <a href="https://openpo.st">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="./assets/brand/lockup-dark.svg">
+      <img src="./assets/brand/lockup.svg" alt="OpenPost" width="240" height="60">
+    </picture>
+  </a>
+</p>
+
+<h3 align="center">An open-source alternative to Buffer, Canva, and CapCut.</h3>
+
+<p align="center">
+  Write posts, design images and carousels, edit videos, and schedule your content in one app.<br>
+  Self-host OpenPost or use OpenPost Hosted.
+</p>
+
+<p align="center">
+  <a href="https://github.com/getopenpost/openpost/releases">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="./assets/badges/downloads-dark.svg">
+      <img src="./assets/badges/downloads-light.svg" alt="Total downloads">
+    </picture>
+  </a>
+  <a href="https://github.com/getopenpost/openpost/releases">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="./assets/badges/release-dark.svg">
+      <img src="./assets/badges/release-light.svg" alt="Latest release">
+    </picture>
+  </a>
+  <a href="https://github.com/getopenpost/openpost/stargazers">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="./assets/badges/stars-dark.svg">
+      <img src="./assets/badges/stars-light.svg" alt="GitHub stars">
+    </picture>
+  </a>
+  <a href="https://url.rgo.pt/x">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="./assets/badges/follow-dev-dark.svg">
+      <img src="./assets/badges/follow-dev-light.svg" alt="Follow the developer on X">
+    </picture>
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://app.openpo.st/image-editor"><strong>Try the image editor</strong></a>
+  ·
+  <a href="https://app.openpo.st/video-editor"><strong>Try the video editor</strong></a>
+  ·
+  <a href="#self-host"><strong>Self-host</strong></a>
+  ·
+  <a href="https://openpo.st/docs"><strong>Docs</strong></a>
+</p>
+
+<p align="center">
+  Both editors are free to use without an account or watermark.<br>
+</p>
+
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=_mZf3HzQaN8">
+    <picture>
+      <source media="(prefers-reduced-motion: reduce)" srcset="./assets/screenshots/readme-hero-dark.webp">
+      <img src="./assets/demos/publishing.gif" alt="Write a post, create a meme, schedule it with confetti, then open analytics and the inbox" width="100%">
+    </picture>
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=_mZf3HzQaN8">Watch the product tour</a>
+  ·
+  <a href="https://openpo.st/#features">See all features</a>
+</p>
+
+## What you can do
+
+Home shows upcoming posts and the replies, failures, and connections that need your attention.
+Use Posts to switch between the list and calendar, and Studio to open the image editor,
+video editor, Quick Cut, or Recorder. Choose New post in your profile's Preferences
+to open the app on the composer instead.
+
+Demos and linked screenshots use sample data.
+
+- <img src="./assets/brand/features/accounts.svg" alt="" width="24" height="24" align="top"> **[Connect accounts](https://openpo.st/docs/guides/accounts).** Manage your social connections in one workspace. Each provider keeps its own capabilities and publishing limits.
+- <img src="./assets/brand/features/compose.svg" alt="" width="24" height="24" align="top"> **[Compose for each platform](https://openpo.st/docs/guides/publishing).** Write posts and threads, then adjust the text and media for each account. Preview each version before publishing. Save account groups as Social Sets to reuse them.
+- <img src="./assets/brand/features/calendar.svg" alt="" width="24" height="24" align="top"> **[Calendar and queues](https://openpo.st/docs/guides/scheduling).** Choose a publishing time or the next free slot in a queue. Plan your posts in the calendar, stagger publishing across accounts, and get reminders when your queue runs low.
+- <img src="./assets/brand/features/workflows.svg" alt="" width="24" height="24" align="top"> **[Workflows](https://openpo.st/docs/workflows).** Turn GitHub releases, RSS feeds, and scheduled prompts into drafts. Connect steps on a visual canvas, add AI or conditions, review posts before scheduling, and inspect each run. Use HTTP requests and JavaScript for custom data.
+- <img src="./assets/brand/features/repost.svg" alt="" width="24" height="24" align="top"> **Auto repost.** Set delays and engagement rules for native reposts on supported networks. Override the defaults for individual posts.
+- <img src="./assets/brand/features/media.svg" alt="" width="24" height="24" align="top"> **[Media library](https://openpo.st/docs/guides/media-library).** Keep reusable images, videos, fonts, and brand assets in your workspace. Organize files with tags, collections, and favorites. Attach saved media without uploading it again.
+- <img src="./assets/brand/features/memes.svg" alt="" width="24" height="24" align="top"> **[Meme maker](https://openpo.st/docs/guides/media-library#add-media-to-a-post).** Pick a template, edit its captions, and replace its images. Save the result to your media library or attach it to a post.
+- <img src="./assets/brand/features/inbox.svg" alt="" width="24" height="24" align="top"> **[Inbox and messages](https://openpo.st/docs/guides/inbox).** Read and reply to supported comments and direct messages without switching between social apps. [View the mobile Inbox screens](./assets/screenshots/mobile-inbox-gallery-light.png).
+- <img src="./assets/brand/features/analytics.svg" alt="" width="24" height="24" align="top"> **[Analytics and repurposing](https://openpo.st/docs/guides/analytics).** Compare post results and track audience changes across your accounts. Use a previous post as the starting point for a new draft.
+- <img src="./assets/brand/features/grow.svg" alt="" width="24" height="24" align="top"> **Find people.** Find accounts to follow on Bluesky and Mastodon. Review the suggestions and choose who to follow.
+- <img src="./assets/brand/features/ideas.svg" alt="" width="24" height="24" align="top"> **AI writing and ideas.** Generate ideas, compare draft directions, and adapt posts for your selected platforms. You review the result before publishing. AI writing is optional. [Self-hosted AI setup](https://openpo.st/docs/self-hosting/ai).
+- <img src="./assets/brand/features/automation.svg" alt="" width="24" height="24" align="top"> **[API, SDK, CLI, MCP, and n8n](https://openpo.st/docs/automate).** Create drafts, schedule posts, and check publishing results from your scripts, agents, or n8n workflows. Install the [TypeScript SDK](https://www.npmjs.com/package/@getopenpost/sdk) or the [CLI](https://www.npmjs.com/package/@getopenpost/cli) from npm. See the [API reference](https://openpo.st/docs/api-reference) for endpoints.
+- <img src="./assets/brand/features/workspaces.svg" alt="" width="24" height="24" align="top"> **[Teams and workspaces](https://openpo.st/docs/guides/workspaces).** Keep brands and clients in separate workspaces and control who can edit them. Protect your account with passkeys, two-factor authentication, and session controls.
+
+### Design images and carousels
+
+Design thumbnails and multi-page carousels with layers, templates, and custom fonts.
+Remove backgrounds in your browser, then export your design or attach it to a post.
+[Try the image editor](https://app.openpo.st/image-editor) · [Image editor guide](https://openpo.st/docs/image-editor)
+
+<a href="https://app.openpo.st/image-editor">
+  <picture>
+    <source media="(prefers-reduced-motion: reduce)" srcset="./assets/screenshots/image-editor-dark.webp">
+    <img src="./assets/demos/image-editor.gif" alt="Recreate a RISC-V YouTube thumbnail by dragging, resizing, and styling its logo and text" width="640">
+  </picture>
+</a>
+
+### Edit and record videos
+
+Trim and arrange clips on a multitrack timeline. Add captions, animations, transitions,
+effects, and audio, or cut footage by selecting words in its transcript.
+The [Recorder](https://openpo.st/docs/video-editor/quick-cut-and-recorder) captures your
+screen, camera, and microphone for the same timeline.
+[Try the video editor](https://app.openpo.st/video-editor) · [Video editor guide](https://openpo.st/docs/video-editor)
+
+<a href="https://app.openpo.st/video-editor">
+  <picture>
+    <source media="(prefers-reduced-motion: reduce)" srcset="./assets/screenshots/video-editor-dark.webp">
+    <img src="./assets/demos/video-editor.gif" alt="Animate a title in and out, add music, cut footage, apply a transition and effects, and adjust its color" width="640">
+  </picture>
+</a>
+
+## Get started
+
+### OpenPost Hosted
+
+Hosted signups are temporarily on a waitlist while we finish the remaining social platform approvals. Existing accounts can still sign in.
+
+<a href="https://app.openpo.st/register">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/buttons/join-waitlist-dark.svg">
+    <img src="./assets/buttons/join-waitlist-light.svg" alt="Join the waitlist" height="36">
+  </picture>
+</a>
+
+[View plans](https://openpo.st/pricing)
+
+### Self-host
+
+Run OpenPost with Docker Compose. The default setup uses one container with SQLite and local media storage.
+
+<a href="https://openpo.st/docs/self-hosting/">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/buttons/self-host-dark.svg">
+    <img src="./assets/buttons/self-host-light.svg" alt="Get started with self-hosting" height="36">
+  </picture>
+</a>
+
+[Configure integrations](https://openpo.st/docs/self-hosting/integrations) · [Backups and upgrades](https://openpo.st/docs/self-hosting/maintenance)
+
+## Supported platforms
+
+<p>
+  <img src="./assets/postiz-socials/Instagram.svg" alt="Instagram" width="32" height="32" align="middle">
+  <img src="./assets/postiz-socials/Facebook.svg" alt="Facebook" width="32" height="32" align="middle">
+  <img src="./assets/postiz-socials/Linkedin.svg" alt="LinkedIn" width="32" height="32" align="middle">
+  <img src="./assets/postiz-socials/X.svg" alt="X" width="32" height="32" align="middle">
+  <img src="./assets/postiz-socials/TikTok.svg" alt="TikTok" width="32" height="32" align="middle">
+  <a href="https://www.youtube.com/"><img src="./assets/logos/youtube.svg" alt="YouTube" width="56" height="48" align="middle"></a>
+  <img src="./assets/postiz-socials/Threads.svg" alt="Threads" width="32" height="32" align="middle">
+  <img src="./assets/postiz-socials/Bluesky.svg" alt="Bluesky" width="32" height="32" align="middle">
+  <img src="./assets/postiz-socials/Mastodon.svg" alt="Mastodon" width="32" height="32" align="middle">
+  <img src="./assets/postiz-socials/Pixelfed.svg" alt="Pixelfed" width="32" height="32" align="middle">
+  <img src="./assets/postiz-socials/Peertube.svg" alt="PeerTube" width="32" height="32" align="middle">
+  <img src="./assets/postiz-socials/Lemmy.svg" alt="Lemmy" width="32" height="32" align="middle">
+  <img src="./assets/postiz-socials/PieFed.svg" alt="PieFed" width="32" height="32" align="middle">
+  <img src="./assets/postiz-socials/Discord.svg" alt="Discord" width="32" height="32" align="middle">
+  <img src="./assets/postiz-socials/Pinterest.svg" alt="Pinterest" width="32" height="32" align="middle">
+  <img src="./assets/postiz-socials/Telegram.svg" alt="Telegram" width="32" height="32" align="middle">
+</p>
+
+OpenPost has integrations for Instagram, Facebook, LinkedIn, X, TikTok, YouTube, Threads, Bluesky, Mastodon, Pixelfed, PeerTube, Lemmy, PieFed, Discord, Pinterest, and Telegram. Mastodon and Pixelfed connect per instance over OAuth; PeerTube, Lemmy, and PieFed connect with instance credentials. Discord supports incoming webhooks and a bot integration; Telegram uses a bot.
+
+Posting formats, inbox features, and analytics vary by platform. Some integrations require provider app approval or publicly reachable media URLs.
+
+[Connect accounts](https://openpo.st/docs/guides/accounts) · [Integration requirements](https://openpo.st/docs/self-hosting/integrations)
+
+## Contributing
+
+Report bugs, improve the docs, or send a pull request. For larger changes, open an issue first so we can agree on the approach.
+
+OpenPost uses Go, SvelteKit, and Expo, with a Devenv development environment. Start with the [contributing guide](./.github/CONTRIBUTING.md) and [development setup](https://openpo.st/docs/development/setup).
+
+<a href="https://github.com/getopenpost/openpost/issues">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/buttons/report-bug-dark.svg">
+    <img src="./assets/buttons/report-bug-light.svg" alt="Report a bug" height="36">
+  </picture>
+</a>
+<a href="https://discord.com/invite/u2QwukmY4W">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/buttons/join-discord-dark.svg">
+    <img src="./assets/buttons/join-discord-light.svg" alt="Join Discord" height="36">
+  </picture>
+</a>
+
+## Star history
+
+Support OpenPost with a [GitHub star](https://github.com/getopenpost/openpost/stargazers).
+
+<!-- star-history:start -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/star-history/star-history-dark.svg">
+  <img alt="Star history" src="assets/star-history/star-history-light.svg">
+</picture>
+<!-- star-history:end -->
+
+## License and security
+
+OpenPost uses the [AGPL-3.0-only license](./LICENSE). See the [third-party notices](./licenses/README.md) for dependency licenses and attribution.
+
+Report vulnerabilities privately through the [security policy](./.github/SECURITY.md).

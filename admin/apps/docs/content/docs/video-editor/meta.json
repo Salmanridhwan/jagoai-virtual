@@ -1,0 +1,15 @@
+{
+  "title": "Video Editor",
+  "icon": "Clapperboard",
+  "root": true,
+  "pages": [
+    "index",
+    "start",
+    "timeline",
+    "color-motion-and-effects",
+    "transcript-and-audio",
+    "export-and-publish",
+    "quick-cut-and-recorder",
+    "browser-and-recovery"
+  ]
+}

@@ -1,0 +1,395 @@
+import { NativeText as Text } from "@/components/native-text";
+import { router, Stack } from "expo-router";
+import { useMemo, useState } from "react";
+import {
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  useWindowDimensions,
+  View,
+} from "react-native";
+
+import { DelayedQueryPlaceholder, InitialQueryError, QueryNotice } from "@/components/query-state";
+import { Button, ContentSection, ContentTitle, IconButton, Screen } from "@/components/ui";
+import { WorkspaceHeader } from "@/components/workspace-header";
+import { DitherPanel } from "@/components/dither-panel";
+import { PublicationRow } from "@/components/publication-row";
+import type { PublicationListItem } from "@/lib/queries";
+import { calendarWeeks, shiftCalendarMonth } from "@/lib/calendar";
+import { calendarOccurrence, dayKey, statusColor } from "@/lib/format";
+import { useCalendarPublications } from "@/lib/queries";
+import { useNativeTheme } from "@/theme";
+
+const WEEKDAYS = [
+  ["S", "Sunday"],
+  ["M", "Monday"],
+  ["T", "Tuesday"],
+  ["W", "Wednesday"],
+  ["T", "Thursday"],
+  ["F", "Friday"],
+  ["S", "Saturday"],
+] as const;
+
+export default function CalendarScreen({ navigation }: { navigation?: React.ReactNode } = {}) {
+  const theme = useNativeTheme();
+  const { width, fontScale } = useWindowDimensions();
+  const stackedMonthControls = width < 360 || fontScale >= 1.3;
+  const { colors, shape, spacing, typography } = theme.manifest;
+  const today = useMemo(() => new Date(), []);
+  const [selectedDate, setSelectedDate] = useState(() => today);
+  const month = useMemo(
+    () => new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1),
+    [selectedDate],
+  );
+  const selectedDay = dayKey(selectedDate);
+
+  const monthStart = month;
+  const monthEnd = new Date(month.getFullYear(), month.getMonth() + 1, 1);
+  const publications = useCalendarPublications(monthStart.toISOString(), monthEnd.toISOString());
+
+  const byDay = useMemo(() => {
+    const map = new Map<string, { publication: PublicationListItem; time: Date }[]>();
+    for (const publication of publications.data ?? []) {
+      const date = calendarOccurrence(publication);
+      if (!date) continue;
+      if (publication.status === "draft" || publication.status === "ready") continue;
+      const key = dayKey(date);
+      const list = map.get(key) ?? [];
+      list.push({
+        publication,
+        time: date,
+      });
+      map.set(key, list);
+    }
+    for (const items of map.values()) items.sort((a, b) => a.time.getTime() - b.time.getTime());
+    return map;
+  }, [publications.data]);
+
+  const weeks = useMemo(() => calendarWeeks(month), [month]);
+
+  const selectedItems = byDay.get(selectedDay) ?? [];
+  const selectedDayTitle = selectedDay
+    ? new Date(`${selectedDay}T12:00:00`).toLocaleDateString("en", {
+        weekday: "long",
+        month: "long",
+        day: "numeric",
+      })
+    : "Select a day";
+  const hasData = publications.data !== undefined;
+  const coldPending = !hasData && publications.isPending;
+
+  function shiftMonth(delta: number) {
+    setSelectedDate((current) => shiftCalendarMonth(current, delta));
+  }
+
+  return (
+    <Screen>
+      <Stack.Screen options={{ headerShown: false }} />
+      <WorkspaceHeader>
+        <IconButton label="Write a post" role="add" onPress={() => router.push("/drafts")} />
+      </WorkspaceHeader>
+      {navigation}
+
+      <ScrollView
+        contentContainerStyle={[
+          styles.content,
+          {
+            paddingHorizontal: spacing.large,
+            paddingTop: spacing.small,
+            paddingBottom: spacing.doubleExtraLarge + spacing.large,
+          },
+        ]}
+        refreshControl={
+          <RefreshControl
+            refreshing={publications.isRefetching}
+            onRefresh={() => void publications.refetch()}
+            tintColor={colors.onSurfaceVariant}
+          />
+        }
+      >
+        <DelayedQueryPlaceholder
+          pending={coldPending}
+          shape="calendar"
+          offline={publications.fetchStatus === "paused"}
+        />
+        {publications.isError && !hasData ? (
+          <InitialQueryError
+            title="Could not load calendar"
+            message={
+              publications.error instanceof Error
+                ? publications.error.message
+                : "Check your connection and try again."
+            }
+            retry={() => void publications.refetch()}
+          />
+        ) : null}
+        {publications.isError && hasData ? (
+          <QueryNotice
+            message="Could not refresh the calendar. Current dates remain visible."
+            retry={() => void publications.refetch()}
+          />
+        ) : null}
+        {hasData && publications.fetchStatus === "paused" ? (
+          <QueryNotice message="You are offline. Current calendar dates remain visible." offline />
+        ) : null}
+
+        {hasData ? (
+          <>
+            <DitherPanel style={{ padding: spacing.small }}>
+              <View
+                style={[
+                  styles.header,
+                  { paddingBottom: spacing.small },
+                  stackedMonthControls && {
+                    flexDirection: "column",
+                    alignItems: "flex-start",
+                    gap: spacing.small,
+                  },
+                ]}
+              >
+                <ContentTitle style={[styles.title, stackedMonthControls && { flex: 0 }]}>
+                  {month.toLocaleDateString("en", {
+                    month: "long",
+                    year: "numeric",
+                  })}
+                </ContentTitle>
+                <View style={[styles.nav, { gap: spacing.extraSmall }]}>
+                  <IconButton
+                    label="Previous month"
+                    role="back"
+                    color={colors.primary}
+                    onPress={() => shiftMonth(-1)}
+                  />
+                  <Button
+                    title="Today"
+                    intent="ordinary"
+                    style={{ paddingHorizontal: spacing.medium }}
+                    onPress={() => setSelectedDate(new Date())}
+                  />
+                  <IconButton
+                    label="Next month"
+                    role="next"
+                    color={colors.primary}
+                    onPress={() => shiftMonth(1)}
+                  />
+                </View>
+              </View>
+
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={width < 360 || fontScale >= 1.3}
+              >
+                <View
+                  style={{
+                    width: Math.max(
+                      7 * Math.max(44, typography.bodyMedium.lineHeight * fontScale + 16),
+                      width - spacing.large * 2 - spacing.small * 2,
+                    ),
+                  }}
+                >
+                  <View style={styles.weekdays}>
+                    {WEEKDAYS.map(([shortLabel, label], index) => (
+                      <Text
+                        accessibilityLabel={label}
+                        key={`${shortLabel}-${index}`}
+                        style={[
+                          styles.weekday,
+                          typography.labelMedium,
+                          { color: colors.onSurfaceVariant },
+                        ]}
+                      >
+                        {shortLabel}
+                      </Text>
+                    ))}
+                  </View>
+
+                  <View style={styles.grid}>
+                    {weeks.map((week, weekIndex) => (
+                      <View key={`week-${weekIndex}`} style={styles.weekRow}>
+                        {week.map((date, dayIndex) => {
+                          if (!date) {
+                            return (
+                              <View key={`blank-${weekIndex}-${dayIndex}`} style={styles.cell} />
+                            );
+                          }
+                          const key = dayKey(date);
+                          const items = byDay.get(key) ?? [];
+                          const isToday = key === dayKey(today);
+                          const isSelected = key === selectedDay;
+                          return (
+                            <Pressable
+                              key={key}
+                              accessibilityRole="button"
+                              accessibilityLabel={`${date.toLocaleDateString("en", {
+                                weekday: "long",
+                                month: "long",
+                                day: "numeric",
+                              })}. ${items.length === 0 ? "Nothing planned" : `${items.length} planned`}`}
+                              accessibilityState={{ selected: isSelected }}
+                              onPress={() => setSelectedDate(date)}
+                              style={({ pressed }) => [styles.cell, pressed && { opacity: 0.6 }]}
+                            >
+                              <View
+                                style={[
+                                  styles.dayCircle,
+                                  {
+                                    width: Math.max(
+                                      38,
+                                      typography.bodyMedium.lineHeight * fontScale + 8,
+                                    ),
+                                    height: Math.max(
+                                      38,
+                                      typography.bodyMedium.lineHeight * fontScale + 8,
+                                    ),
+                                  },
+                                  { borderRadius: shape.full },
+                                  isSelected && {
+                                    backgroundColor: colors.primary,
+                                  },
+                                  !isSelected &&
+                                    isToday && {
+                                      borderWidth: 1.5,
+                                      borderColor: colors.primary,
+                                    },
+                                ]}
+                              >
+                                <Text
+                                  style={[
+                                    typography.bodyMedium,
+                                    { color: colors.onSurface },
+                                    isSelected && typography.labelLarge,
+                                    isSelected && { color: colors.onPrimary },
+                                  ]}
+                                >
+                                  {date.getDate()}
+                                </Text>
+                              </View>
+                              <View style={styles.dots}>
+                                {items.slice(0, 3).map((item) => (
+                                  <View
+                                    key={item.publication.id}
+                                    style={[
+                                      styles.dot,
+                                      {
+                                        backgroundColor: statusColor(
+                                          item.publication.status,
+                                          colors.status,
+                                          colors.onSurfaceVariant,
+                                        ),
+                                      },
+                                    ]}
+                                  />
+                                ))}
+                              </View>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    ))}
+                  </View>
+                </View>
+              </ScrollView>
+            </DitherPanel>
+            <ContentSection style={[styles.daySheet, { gap: spacing.medium }]}>
+              <ContentTitle>{selectedDayTitle}</ContentTitle>
+              {selectedItems.length === 0 ? (
+                <View style={{ gap: spacing.medium, alignItems: "flex-start" }}>
+                  <Text style={[typography.bodyLarge, { color: colors.onSurfaceVariant }]}>
+                    Nothing planned.
+                  </Text>
+                  <Button title="Write a post" onPress={() => router.push("/drafts")} />
+                </View>
+              ) : (
+                selectedItems.map((item) => (
+                  <PublicationRow
+                    key={item.publication.id}
+                    publication={item.publication}
+                    showStatus
+                    detail={item.time.toLocaleTimeString("en", {
+                      hour: "numeric",
+                      minute: "2-digit",
+                    })}
+                    onPress={() =>
+                      router.push({
+                        pathname: "/publications/[id]",
+                        params: { id: item.publication.id },
+                      })
+                    }
+                  />
+                ))
+              )}
+            </ContentSection>
+          </>
+        ) : null}
+      </ScrollView>
+    </Screen>
+  );
+}
+
+const styles = StyleSheet.create({
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  title: {
+    flex: 1,
+  },
+  nav: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  content: {
+    width: "100%",
+    alignSelf: "stretch",
+  },
+  weekdays: {
+    width: "100%",
+    flexDirection: "row",
+    marginBottom: 4,
+  },
+  weekday: {
+    flex: 1,
+    textAlign: "center",
+  },
+  grid: {
+    width: "100%",
+  },
+  weekRow: {
+    flexDirection: "row",
+    width: "100%",
+  },
+  cell: {
+    flex: 1,
+    alignItems: "center",
+    paddingVertical: 3,
+    minHeight: 54,
+  },
+  dayCircle: {
+    width: 38,
+    height: 38,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  dots: {
+    flexDirection: "row",
+    gap: 2,
+    marginTop: 2,
+    height: 4,
+  },
+  dot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+  },
+  daySheet: {
+    marginTop: 16,
+  },
+  itemRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 6,
+    gap: 10,
+  },
+});

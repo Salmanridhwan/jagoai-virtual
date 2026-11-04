@@ -1,0 +1,163 @@
+---
+title: Create and publish posts with the SDK
+description: Create a draft, attach media, customize variants, and inspect delivery.
+icon: Send
+---
+
+The SDK calls a post a `Publication` and its destination variant a `Rendition`. Create a draft, inspect it, then validate and schedule or publish it.
+
+## Create a draft
+
+```ts
+const draft = await openpost.publications.create({
+  workspace_id: openpost.workspaceId(),
+  title: "Launch day",
+  content_profile: "short_text",
+  source_text: "We just shipped the new import flow.",
+  social_account_ids: ["acc_linkedin", "acc_x"],
+});
+```
+
+Omit `social_account_ids` to keep the draft without destinations. Pass `social_set_id` to copy that Social Set's accounts and saved destination defaults into the new Publication.
+
+## Selected mentions
+
+Use the destination account's provider search, then retain its returned target:
+
+```ts
+const matches = await openpost.accounts.lookupMentions("acc_bluesky", "alice");
+const selectedDID = "did:plc:ewvi7nxzyoun6zhxrhs64oiz";
+const candidate = matches.candidates.find(({ target }) => target.id === selectedDID);
+if (!candidate) throw new Error("Choose a matching account first.");
+const prefix = "Hi ";
+const start = new TextEncoder().encode(prefix).length;
+const body = prefix + candidate.label;
+
+const draft = await openpost.publications.create({
+  workspace_id: openpost.workspaceId(),
+  title: "Hello",
+  content_profile: "short_text",
+  source_text: body,
+  social_account_ids: ["acc_bluesky"],
+  segments: [
+    {
+      body,
+      settings: {
+        mentions: {
+          version: 1,
+          spans: [
+            {
+              start,
+              end: new TextEncoder().encode(body).length,
+              text: candidate.label,
+              target: candidate.target,
+            },
+          ],
+        },
+      },
+    },
+  ],
+});
+```
+
+Ranges use UTF-8 bytes. Choose identities separately for each network and preserve metadata when editing threads or variants. See the [HTTP mention contract](/docs/automate/api/publications#select-people-and-company-mentions) for inheritance, explicit removal and body-only compatibility.
+
+## Upload and attach media
+
+`media.upload()` handles the OpenPost upload-session flow. It reserves the media record, sends the bytes to the returned storage target, and completes the record.
+
+```ts
+const bytes = new Uint8Array(await Bun.file("cover.png").arrayBuffer());
+
+const asset = await openpost.media.upload({
+  workspaceId: openpost.workspaceId(),
+  file: bytes,
+  filename: "cover.png",
+  mimeType: "image/png",
+  altText: "Product import screen with the completed file list",
+});
+```
+
+External storage targets receive only the upload headers returned by OpenPost. The SDK never sends your OpenPost bearer token to another origin.
+
+Attach the returned ID when you create a Publication:
+
+```ts
+const draft = await openpost.publications.create({
+  workspace_id: openpost.workspaceId(),
+  title: "Import walkthrough",
+  content_profile: "image_post",
+  source_text: "The new import flow is live.",
+  social_account_ids: ["acc_linkedin"],
+  media: [
+    {
+      media_id: asset.id,
+      alt_text: "Product import screen with the completed file list",
+    },
+  ],
+});
+```
+
+Use `media.list(workspaceId)` to inspect the library and `media.remove(id)` to remove an unused item. OpenPost still applies workspace quotas, file validation, provider limits, and media processing after the bytes arrive.
+
+To fit an image to one account and format, request a separate derivative:
+
+```ts
+const fitted = await openpost.media.prepareImage(asset.id, {
+  account_id: "acc_linkedin",
+  output_profile: "linkedin.post",
+});
+```
+
+Inspect the returned status and media, then explicitly attach `fitted.media.id` to the chosen variant. Preparation keeps the original and does not change a saved post's attachments.
+
+## Customize a destination
+
+Read the current revision before changing Renditions. Send every Rendition you want to keep because this method replaces the saved destination set.
+
+```ts
+const linkedinOptions = await openpost.accounts.destinationOptions("acc_linkedin");
+console.dir(linkedinOptions, { depth: null });
+
+const saved = await openpost.publications.upsertRenditions(draft.id, draft.revision, [
+  {
+    social_account_id: "acc_linkedin",
+    body: "We shipped a faster import flow. Read the release notes:",
+    settings: { url: "https://example.com/releases/imports" },
+  },
+  {
+    social_account_id: "acc_x",
+    body: "The new import flow is live.",
+  },
+]);
+```
+
+Resolve `accounts.destinationOptions(accountId)` before constructing provider-specific settings. It returns the current keys and choices for that account. OpenPost returns a conflict when an account has multiple subdestinations and the Rendition does not include a `target_key`.
+
+## Validate and publish now
+
+```ts
+await openpost.publications.validate(saved.id, { throwOnInvalid: true });
+
+const action = await openpost.publications.publishNow(saved.id, saved.revision);
+if (action.job_id) {
+  await openpost.jobs.wait(action.job_id);
+}
+```
+
+To publish later, set `scheduled_at` with `create()` or `update()`, then call `schedule()` with the latest revision. A scheduled job remains pending until that time, so do not call `jobs.wait()` in a short-lived request. `publishNow`, `schedule`, `cancel`, and `remove` take the revision you last read. This prevents a stale process from overwriting a newer edit. `retryFailed` retries failed Renditions without republishing successful ones.
+
+## Read the outcome
+
+```ts
+const result = await openpost.publications.wait(saved.id, {
+  timeoutMs: 120_000,
+  intervalMs: 2_000,
+});
+
+for (const rendition of result.renditions) {
+  console.log(rendition.platform, rendition.status, rendition.external_url);
+}
+```
+
+Do not treat a queued job as proof of provider delivery. Read the final Publication, its Renditions, or `publications.events(id)`.

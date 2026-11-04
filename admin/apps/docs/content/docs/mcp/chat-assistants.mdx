@@ -1,0 +1,23 @@
+---
+title: Chat assistants
+description: Connect your assistant to OpenPost through MCP.
+icon: MessagesSquare
+---
+
+Choose your client below. Use [MCP connection setup](/mcp/mcp-guide) for shared permissions, self-hosted URLs, and the local bridge. After setup, ask the assistant to list your workspaces, then review the schedule for a named workspace without changes.
+
+## Chat clients
+
+[ChatGPT](/mcp/chatgpt) connects in developer mode through remote MCP. Start with read access to check the connection, then grant write access when ChatGPT needs to prepare or publish content.
+
+[Claude web](/mcp/claude) uses a custom connector for schedule reviews and drafts. Your Claude account or organization must allow custom connectors. For other Claude surfaces, see [Claude Desktop](/mcp/claude-desktop) or [Claude Code](/mcp/claude-code).
+
+[Claude Desktop](/mcp/claude-desktop) supports a remote account connector and local tools. Choose the remote connector for Hosted, or the local bridge when your OpenPost instance is reachable only from your computer.
+
+[Grok](/mcp/grok) connects through a custom remote connector, with a separate Grok Build CLI entry for terminal work. Cloud connectors need public HTTPS and cannot reach `localhost`.
+
+[Perplexity](/mcp/perplexity) uses a custom remote connector for conversations or Computer workflows. Check that your account exposes custom connectors and reconnect when authorization expires.
+
+## Verify access
+
+Request an unpublished draft for your first write and inspect it in OpenPost. Check the workspace, accounts, text, media, and time before approving a schedule or publish action. For missing tools, expired credentials, or delivery failures, use [Tasks and troubleshooting](/mcp/mcp-guide/use-cases).

@@ -1,0 +1,141 @@
+<script lang="ts">
+	import { ThemeIcon } from '$lib/themes/icons';
+	import { m } from '$lib/paraglide/messages';
+	import type { GpuEffect } from '$lib/video-editor/effects/types';
+	import {
+		isEffectAtDefaults,
+		removeEffectOnItems,
+		resetEffectOnItems,
+		setEffectEnabledOnItems
+	} from '$lib/video-editor/timeline/actions/effects';
+	import { timelineStore } from '$lib/video-editor/timeline/stores/timeline-store.svelte';
+	import { resolveEditableColorTargetIds } from '$lib/video-editor/effects/color-targets';
+
+	let {
+		itemId,
+		itemIds = [],
+		effectId,
+		label,
+		badge,
+		onedit,
+		compact = false
+	}: {
+		itemId: string | null;
+		itemIds?: string[];
+		effectId: string;
+		label: string;
+		badge?: string;
+		onedit: () => void;
+		compact?: boolean;
+	} = $props();
+
+	const effect = $derived(
+		itemId
+			? (timelineStore.itemById
+					.get(itemId)
+					?.effects?.find(
+						(candidate): candidate is GpuEffect =>
+							candidate.type === 'gpu' && candidate.effectId === effectId
+					) ?? null)
+			: null
+	);
+	const targetItemIds = $derived(
+		resolveEditableColorTargetIds(itemId, itemIds, timelineStore.itemById, timelineStore.tracks)
+	);
+	const displayItemEditable = $derived(itemId !== null && targetItemIds.includes(itemId));
+	const isDefault = $derived(!effect || isEffectAtDefaults(effect));
+
+	function reset(): void {
+		if (!itemId || !effect || !displayItemEditable) return;
+		if (resetEffectOnItems(itemId, targetItemIds, effect.id)) onedit();
+	}
+
+	function toggle(): void {
+		if (!itemId || !effect || !displayItemEditable) return;
+		if (setEffectEnabledOnItems(itemId, targetItemIds, effect.id, !effect.enabled)) onedit();
+	}
+
+	function remove(): void {
+		if (!itemId || !effect || !displayItemEditable) return;
+		if (removeEffectOnItems(itemId, targetItemIds, effect.id)) onedit();
+	}
+</script>
+
+<header
+	class="flex shrink-0 items-center justify-between gap-2 border-y border-[var(--video-editor-border)] bg-[var(--video-editor-control)] px-2 {compact
+		? 'h-[25px]'
+		: 'h-8'}"
+>
+	<h3 class="min-w-0 truncate text-xs font-medium text-[var(--video-editor-text)]">{label}</h3>
+	<div class="flex min-w-0 items-center justify-end gap-0.5">
+		{#if badge}
+			<span class="mr-1 font-mono text-[9px] tracking-wide text-[var(--video-editor-muted)]"
+				>{badge}</span
+			>
+		{/if}
+		<button
+			type="button"
+			class="effect-action"
+			disabled={!displayItemEditable || !effect || isDefault}
+			title={m.video_editor_effects_reset()}
+			aria-label={m.video_editor_effects_reset()}
+			onclick={reset}
+		>
+			<ThemeIcon role="undo" class="size-3" />
+		</button>
+		<button
+			type="button"
+			class="effect-action"
+			disabled={!displayItemEditable || !effect}
+			title={effect?.enabled ? m.video_editor_effects_disable() : m.video_editor_effects_enable()}
+			aria-label={effect?.enabled
+				? m.video_editor_effects_disable()
+				: m.video_editor_effects_enable()}
+			onclick={toggle}
+		>
+			{#if effect?.enabled}
+				<ThemeIcon role="eye" class="size-3" />
+			{:else}
+				<ThemeIcon role="eye-off" class="size-3" />
+			{/if}
+		</button>
+		<button
+			type="button"
+			class="effect-action"
+			disabled={!displayItemEditable || !effect}
+			title={m.video_editor_effects_remove()}
+			aria-label={m.video_editor_effects_remove()}
+			onclick={remove}
+		>
+			<ThemeIcon role="delete" class="size-3" />
+		</button>
+	</div>
+</header>
+
+<style>
+	.effect-action {
+		display: flex;
+		height: 1.5rem;
+		width: 1.5rem;
+		flex-shrink: 0;
+		align-items: center;
+		justify-content: center;
+		border-radius: 0.25rem;
+		color: var(--video-editor-muted);
+	}
+
+	.effect-action:hover:not(:disabled) {
+		background: var(--video-editor-control-hover);
+		color: var(--video-editor-text);
+	}
+
+	.effect-action:focus-visible {
+		outline: 2px solid var(--video-editor-focus);
+		outline-offset: 1px;
+	}
+
+	.effect-action:disabled {
+		cursor: not-allowed;
+		opacity: 0.3;
+	}
+</style>

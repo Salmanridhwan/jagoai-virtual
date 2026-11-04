@@ -1,0 +1,232 @@
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+export const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+const excludedPrefixes = [
+  ".agents/",
+  ".hermes/",
+  "docs/research/",
+  "apps/web/static/image-editor-models/",
+];
+
+function fumadocsPageRoute(page) {
+  if (page === "index") return "/";
+  if (page.endsWith("/index")) return `/${page.slice(0, -6)}`;
+  return `/${page}`;
+}
+
+function fumadocsMetaTarget(entry, relativeDirectory) {
+  if (
+    entry === "..." ||
+    entry === "z...a" ||
+    entry.startsWith("---") ||
+    entry.startsWith("...") ||
+    entry.startsWith("!")
+  ) {
+    return undefined;
+  }
+
+  const link = entry.match(/^(?:external:)?(?:\[[^\]]+\])?\[[^\]]+\]\(([^)]+)\)$/u);
+  if (link) return link[1];
+
+  const page = path.posix.join(relativeDirectory, entry.replace(/\.mdx?$/u, ""));
+  return fumadocsPageRoute(page);
+}
+
+export function fumadocsNavigationTargets(root) {
+  const docsRoot = path.join(root, "apps/docs/content/docs");
+  if (!existsSync(docsRoot)) return [];
+  const targets = [];
+  const visit = (directory, relativeDirectory = "") => {
+    const metaPath = path.join(directory, "meta.json");
+    if (existsSync(metaPath)) {
+      const meta = JSON.parse(readFileSync(metaPath, "utf8"));
+      for (const entry of Array.isArray(meta) ? meta : (meta.pages ?? [])) {
+        if (typeof entry !== "string") continue;
+        const target = fumadocsMetaTarget(entry, relativeDirectory);
+        if (target) targets.push(target);
+      }
+    }
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory() && !entry.name.startsWith(".")) {
+        visit(path.join(directory, entry.name), path.posix.join(relativeDirectory, entry.name));
+      }
+    }
+  };
+  visit(docsRoot);
+  return [...new Set(targets)].sort();
+}
+
+function fumadocsNavigationTargetExists(root, target) {
+  if (target === "/") return existsSync(path.join(root, "apps/docs/content/docs/index.mdx"));
+  const relative = target.replace(/^\//u, "");
+  const directory = path.join(root, "apps/docs/content/docs", relative);
+  return (
+    existsSync(directory) || localDocumentationTargetExists(root, "apps/docs/meta.json", target)
+  );
+}
+
+export function localDocumentationCandidates(root, sourceFile, rawTarget) {
+  const target = rawTarget.replace(/^<|>$/g, "");
+  if (/^(?:https?:|mailto:|tel:|data:|#)/i.test(target)) return [];
+
+  let localTarget;
+  try {
+    localTarget = decodeURIComponent(target.split("#")[0].split("?")[0]);
+  } catch {
+    return [path.join(root, "__invalid_encoded_documentation_target__")];
+  }
+  if (!localTarget) return [];
+
+  const sourcePath = path.join(root, sourceFile);
+  const docsMountedTarget =
+    sourceFile.startsWith("apps/docs/") && localTarget.startsWith("/docs")
+      ? localTarget.slice("/docs".length) || "/"
+      : localTarget;
+  const bases =
+    docsMountedTarget.startsWith("/") && sourceFile.startsWith("apps/docs/")
+      ? [
+          path.join(root, "apps/docs", docsMountedTarget),
+          path.join(root, "apps/docs/content/docs", docsMountedTarget),
+          path.join(root, "apps/docs/public", docsMountedTarget),
+          ...(docsMountedTarget === "/openapi.json"
+            ? [path.join(root, "apps/web/openapi.json")]
+            : []),
+        ]
+      : [path.resolve(path.dirname(sourcePath), docsMountedTarget)];
+  return bases.flatMap((base) => [
+    base,
+    `${base}.md`,
+    `${base}.mdx`,
+    path.join(base, "README.md"),
+    path.join(base, "index.md"),
+    path.join(base, "index.mdx"),
+  ]);
+}
+
+export function localDocumentationTargetExists(root, sourceFile, target) {
+  const candidates = localDocumentationCandidates(root, sourceFile, target);
+  const pageLink = sourceFile.startsWith("apps/docs/content/docs/");
+  return (
+    candidates.length === 0 ||
+    candidates.some(
+      (candidate) => existsSync(candidate) && (!pageLink || statSync(candidate).isFile()),
+    )
+  );
+}
+
+export function markdownTargets(contents) {
+  return [
+    ...[...contents.matchAll(/!?\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g)].map((match) => match[1]),
+    ...[...contents.matchAll(/<(?:a|img)\b[^>]*(?:href|src)=["']([^"']+)["']/gi)].map(
+      (match) => match[1],
+    ),
+    ...[...contents.matchAll(/^\[[^\]]+\]:\s*(\S+)/gm)].map((match) => match[1]),
+  ];
+}
+
+export function unreachableDocumentationPages(
+  root,
+  pageFiles,
+  navigationTargets,
+  readPage = (file) => readFileSync(path.join(root, file), "utf8"),
+) {
+  const pages = new Set(pageFiles);
+  const resolvePage = (sourceFile, target) => {
+    for (const candidate of localDocumentationCandidates(root, sourceFile, target)) {
+      const relativeCandidate = path.relative(root, candidate).split(path.sep).join("/");
+      if (pages.has(relativeCandidate)) return relativeCandidate;
+    }
+    return undefined;
+  };
+
+  const pending = [];
+  const queue = (file) => {
+    if (file && !pending.includes(file)) pending.push(file);
+  };
+
+  queue(
+    pages.has("apps/docs/content/docs/index.mdx") ? "apps/docs/content/docs/index.mdx" : undefined,
+  );
+  for (const target of navigationTargets) {
+    queue(resolvePage("apps/docs/content/docs/index.mdx", target));
+  }
+
+  const reachable = new Set();
+  while (pending.length > 0) {
+    const file = pending.shift();
+    if (!file || reachable.has(file)) continue;
+    reachable.add(file);
+
+    for (const target of markdownTargets(readPage(file))) {
+      queue(resolvePage(file, target));
+    }
+  }
+
+  return [...pages].filter((file) => !reachable.has(file)).sort();
+}
+
+async function main() {
+  const files = execFileSync(
+    "git",
+    ["ls-files", "--cached", "--others", "--exclude-standard", "--", "*.md", "*.mdx"],
+    {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+    },
+  )
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .filter((file) => existsSync(path.join(repositoryRoot, file)))
+    .filter((file) => !excludedPrefixes.some((prefix) => file.startsWith(prefix)));
+
+  const failures = [];
+  for (const file of files) {
+    const contents = readFileSync(path.join(repositoryRoot, file), "utf8");
+    for (const target of markdownTargets(contents)) {
+      if (!localDocumentationTargetExists(repositoryRoot, file, target)) {
+        failures.push(`${file} -> ${target}`);
+      }
+    }
+  }
+
+  const navigationTargets = fumadocsNavigationTargets(repositoryRoot);
+  for (const target of navigationTargets) {
+    if (!fumadocsNavigationTargetExists(repositoryRoot, target)) {
+      failures.push(`apps/docs/content/docs/meta.json -> ${target}`);
+    }
+  }
+
+  const documentationPages = files.filter(
+    (file) =>
+      file.startsWith("apps/docs/content/docs/") &&
+      !/^apps\/docs\/content\/docs\/api-reference\/[^/]+\/[^/]+\.mdx$/u.test(file),
+  );
+  const unreachablePages = unreachableDocumentationPages(
+    repositoryRoot,
+    documentationPages,
+    navigationTargets,
+  );
+  failures.push(
+    ...unreachablePages.map(
+      (file) => `${file} is not reachable from the docs home or configured navigation`,
+    ),
+  );
+
+  if (failures.length > 0) {
+    console.error(`Broken local documentation links:\n${failures.join("\n")}`);
+    process.exit(1);
+  }
+
+  console.log(
+    `Checked local links in ${files.length} maintained Markdown files, ${navigationTargets.length} configured navigation targets, and reachability for ${documentationPages.length} documentation pages.`,
+  );
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await main();
+}

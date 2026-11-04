@@ -1,0 +1,174 @@
+/* Framework-neutral recovery chrome for Svelte, docs and bundle-free fallbacks. */
+.op-recovery {
+  box-sizing: border-box;
+  width: min(100% - 2rem, 64rem);
+  min-height: min(48rem, 100svh);
+  margin-inline: auto;
+  padding-block: clamp(2rem, 6vw, 5rem);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  font-family: var(--theme-font-sans);
+  color: var(--foreground);
+}
+.op-recovery-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+  align-self: flex-start;
+  min-height: 44px;
+  margin-bottom: 2rem;
+  color: var(--foreground);
+  font-family: var(--theme-font-brand);
+  font-size: 1rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+.op-recovery-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: clamp(2rem, 6vw, 5rem);
+}
+.op-recovery h1 {
+  margin: 0;
+  font-family: var(--theme-type-display-family);
+  font-size: clamp(2rem, 4.5vw, 3.5rem);
+  font-weight: var(--theme-type-display-weight);
+  line-height: 1.08;
+  letter-spacing: var(--theme-type-display-tracking);
+  text-wrap: balance;
+}
+.op-recovery-copy {
+  margin: 1rem 0 0;
+  max-width: 38ch;
+  color: var(--muted-foreground);
+  font-size: 1rem;
+  line-height: 1.6;
+  text-wrap: pretty;
+}
+.op-recovery-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  margin-top: 1.75rem;
+}
+.op-recovery-art {
+  margin: 0;
+  text-align: center;
+}
+.op-recovery-art img {
+  display: block;
+  width: min(100%, 28rem);
+  height: auto;
+  margin-inline: auto;
+}
+.op-recovery-status {
+  margin: 0.5rem 0 0;
+  color: var(--muted-foreground);
+  font-family: var(--theme-font-mono);
+  font-size: 0.875rem;
+}
+.op-recovery-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  color: var(--action-link);
+  font-size: 0.875rem;
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 0.25em;
+}
+.op-recovery-link:hover {
+  color: var(--action-link-hover);
+}
+.op-recovery :is(a, button):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 4px;
+}
+.op-recovery ::selection {
+  background: var(--selection);
+  color: var(--selection-foreground);
+}
+.op-recovery--compact {
+  max-width: 30rem;
+  min-height: 100svh;
+}
+.op-recovery--compact .op-recovery-body {
+  grid-template-columns: minmax(0, 1fr);
+}
+@media (max-width: 40rem) {
+  .op-recovery {
+    min-height: 100svh;
+    padding-block: 1.5rem 2.5rem;
+  }
+  .op-recovery-brand {
+    margin-bottom: 1rem;
+  }
+  .op-recovery-body {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1.5rem;
+  }
+  .op-recovery-art {
+    grid-row: 1;
+  }
+  .op-recovery-art img {
+    width: min(65vw, 17rem);
+  }
+}
+
+/* The static adapter uses the same semantic action roles as Button. */
+[data-static-action] {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  padding: 0.625rem 1rem;
+  border: 1px solid var(--action-primary);
+  border-radius: var(--theme-radius-md);
+  background: var(--action-primary);
+  color: var(--action-primary-foreground);
+  font: 600 0.875rem/1.5 var(--theme-font-sans);
+  text-decoration: none;
+  cursor: pointer;
+  transition: background-color var(--theme-duration-normal) var(--theme-easing);
+}
+[data-static-action]:hover {
+  background: var(--action-primary-hover);
+}
+[data-static-action]:active {
+  background: var(--action-primary-active);
+}
+[data-static-action][data-dither-button] {
+  --dither-mask: var(--static-dither-rest);
+}
+[data-static-action][data-dither-button]:not(:disabled, [aria-disabled="true"]):is(
+    :hover,
+    :focus-visible
+  ) {
+  --dither-mask: var(--static-dither-hover);
+  background: var(--action-primary);
+}
+[data-static-action][data-dither-button]:not(:disabled, [aria-disabled="true"]):active {
+  --dither-mask: var(--static-dither-pressed);
+  background: var(--action-primary);
+}
+[data-static-action]:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 4px;
+}
+[data-static-action]:disabled {
+  background: var(--disabled);
+  border-color: var(--disabled);
+  color: var(--disabled-foreground);
+  cursor: not-allowed;
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-static-action] {
+    transition: none;
+  }
+}

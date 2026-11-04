@@ -1,0 +1,34 @@
+---
+title: Install on Portainer
+description: Deploy OpenPost as a Portainer stack with environment variables entered in the UI.
+icon: portainer
+---
+
+Deploy OpenPost with [Portainer Stacks](https://docs.portainer.io/user/docker/stacks/add) and the supplied [`deploy/portainer/docker-compose.yml`](https://github.com/getopenpost/openpost/blob/main/deploy/portainer/docker-compose.yml). The image supports x86_64 and ARM64 Docker hosts.
+
+## What you need
+
+- A Portainer environment on a Docker Standalone host.
+- A public HTTPS address before you connect social accounts.
+
+## Deploy
+
+1. In Portainer, open **Stacks → Add stack** and name it `openpost`.
+2. Paste the Compose file into **Web editor**, upload it, or select **Git repository** with the path `deploy/portainer/docker-compose.yml`.
+3. Under **Environment variables**, add the [public URLs](/self-hosting/configuration#public-addresses) and [secrets](/self-hosting/configuration#deployment-secrets). Use **Load variables from .env file** if you keep them in a file.
+
+4. Select **Deploy the stack**, then verify readiness:
+
+```sh
+curl https://post.example.com/api/v1/ready
+```
+
+Expect `"status":"ready"` and `"database":"ok"`. Check the stack logs if it fails.
+
+Open the app and create the first account. It becomes the instance administrator. The stack stores SQLite and media in the `openpost_data` volume.
+
+## Upgrade and back up
+
+Pin the image to a release tag before production use. Back up the `openpost_data` volume and private environment settings before changing the tag and redeploying. Follow the [maintenance guide](/self-hosting/maintenance) for readiness checks and restores. Database migrations can require restoring a matching backup when rolling back.
+
+After installation, [configure social integrations](/self-hosting/integrations) and [email delivery](/self-hosting/email) if needed.

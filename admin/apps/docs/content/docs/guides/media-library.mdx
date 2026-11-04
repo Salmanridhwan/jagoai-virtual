@@ -1,0 +1,57 @@
+---
+title: Media library
+description: Upload, organize, reuse, and clean up your workspace media.
+icon: FolderOpen
+---
+
+Open **Media** in the workspace that owns your files. Upload images, video, or audio, then reuse them in posts without uploading another copy.
+
+Images must decode successfully and stay within the [upload limits](/guides/media-limits#upload-limits). This bounds the memory needed to open compressed files; destination publishing limits are separate.
+
+## Find and organize a file
+
+1. Open **Media** and search by name, alt text, or tag. Filter by media type, source, size, shape, or date when needed.
+2. Open a file to preview it and inspect its details, alt text, tags, and uses.
+3. Select files to add tags, mark favorites, or move them to Trash.
+
+A file can have several tags. Selecting several tag filters shows files with all of them. Deleting a tag leaves its files intact. New uploads remain untagged unless you upload into an active tag filter. Pasted or dropped composer files remain untagged.
+
+## Add media to a post
+
+Open the composer's media picker:
+
+| Source           | What it adds                                                              |
+| ---------------- | ------------------------------------------------------------------------- |
+| Library          | A saved workspace file                                                    |
+| Upload or Camera | A file from your device or a new photo                                    |
+| Meme             | An editable meme template and captions                                    |
+| Templates        | A [conversation, receipt, or status image](/guides/screenshot-templates)  |
+| Create           | An [Image Editor design](/image-editor/create-a-design#start-from-a-post) |
+
+Files attach in the order you choose. Check each destination's preview and [media requirements](/guides/media-limits). Use [Video Editor](/video-editor) for a full edit, [Quick Cut](/video-editor/quick-cut-and-recorder#trim-with-quick-cut) for cuts, or [Recorder](/video-editor/quick-cut-and-recorder#capture-with-recorder) for new footage.
+
+If AI meme suggestions are available, describe the idea and choose a tone. The model receives your idea and written template notes, not template images or workspace images. Review the captions, alt text, and template license before attaching the result.
+
+## Review automatic alt text
+
+When AI captioning is configured, attaching an image without alt text in the text-and-thread composer requests a caption. OpenPost sends a small thumbnail and relevant post text to an external AI provider. It keeps any alt text you already wrote, including edits made while the request runs. Review the result before publishing. A captioning failure does not block the attachment.
+
+Self-hosted operators can find the processing details in [AI setup](/self-hosting/ai).
+
+## Prepare a video upload
+
+For one video, trim its start and end or crop it in the upload view. Drag the crop area or use the arrow keys, then zoom to choose what stays visible. Some browsers support trimming but not cropping.
+
+OpenPost checks and, when needed, converts the video in your browser to meet the selected accounts' limits. Compatible H.264/AAC MP4 files stay unchanged. You can cancel preparation from the progress view.
+
+After upload, wait for the server's file check before scheduling or publishing. If it fails, open the file in Media, read the error, and use **Retry** after fixing it. Some providers download the finished video from a public HTTPS URL, so keep it available until delivery finishes.
+
+## Trash and storage
+
+A file cannot be deleted while a post, design, template, brand item, font, preview, or export uses it. Open its details to find those uses. Editing an image creates a design or copy and leaves the original unchanged. Deleting a design leaves its exports intact.
+
+Temporary post media moves to Trash after its final successful publication or after 14 days without use. Favorites, tags, collections, brand files, active drafts, schedules, retryable work, and source or design links prevent this cleanup. Disk-backed Video Editor projects do not keep a Media file in use.
+
+Trash keeps files for seven days before deleting them permanently. Restoring a file restarts its unused period. These periods cannot be changed in workspace settings.
+
+Uploads, camera photos, exports, edited copies, brand files, and custom fonts count toward workspace storage. Hidden design and template previews do not.

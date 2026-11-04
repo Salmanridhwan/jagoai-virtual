@@ -1,0 +1,6 @@
+{
+  "title": "MCP",
+  "icon": "Plug",
+  "defaultOpen": true,
+  "pages": ["index", "media", "use-cases"]
+}

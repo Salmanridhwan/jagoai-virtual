@@ -1,0 +1,522 @@
+<script lang="ts">
+	import EditorColorWheel from '$lib/components/editor-color-wheel.svelte';
+	import EditorColorCurves from '$lib/components/editor-color-curves.svelte';
+	import EditorColorScopes from '$lib/components/editor-color-scopes.svelte';
+	import { EDITOR_COLOR_WHEELS } from '$lib/editor-color-grade/controls';
+	import {
+		defaultEditorColorWheels,
+		hasEditorColorGrade,
+		type EditorColorWheels,
+		type EditorColorCurves as ColorCurveValues
+	} from '$lib/editor-color-grade/model';
+	import { onDestroy } from 'svelte';
+	import { Button } from '$lib/components/ui/button';
+	import * as Tabs from '$lib/components/ui/tabs';
+	import { SliderRow } from '$lib/components/editor-density';
+	import EditorColorComparison from '$lib/components/editor-color-comparison.svelte';
+	import {
+		EDITOR_COLOR_GRADE_PRESETS,
+		editorColorGradePresetLabel
+	} from '$lib/editor-color-grade/presets';
+	import { m } from '$lib/paraglide/messages';
+	import {
+		IMAGE_COLOR_GRADE_VERSION,
+		defaultEditorColorGradeAdjustments
+	} from '$lib/editor-color-grade/model';
+	import { defaultImageAdjustments } from '../document';
+	import { imageEditorMixedValue, useImageEditor } from '../editor.svelte';
+	import type { ImageEditorImageAdjustments } from '../types';
+	import {
+		EDITOR_COLOR_ADJUSTMENT_GROUPS,
+		EDITOR_COLOR_ADJUSTMENT_KEYS,
+		EDITOR_COLOR_ADJUSTMENT_RANGES,
+		type EditorColorComparisonMode
+	} from '$lib/editor-color-grade/controls';
+
+	type ColorScope = 'layer' | 'page';
+	type AdjustmentControl = readonly [
+		string,
+		Exclude<keyof ImageEditorImageAdjustments, 'wheels' | 'curves'>,
+		number,
+		number
+	];
+
+	const editor = useImageEditor();
+	if (editor.colorWorkspaceScope === null) {
+		editor.colorWorkspaceScope = editor.selectedLayers.some(
+			(layer) => layer.type === 'image' && layer.image
+		)
+			? 'layer'
+			: 'page';
+	}
+	const scope = $derived(editor.colorWorkspaceScope);
+	let toolScroller = $state<HTMLDivElement>();
+	$effect(() => {
+		// Start each chosen tool at its first control in both responsive panels.
+		if (editor.colorWorkspaceTool && toolScroller) toolScroller.scrollTop = 0;
+	});
+	const tools = $derived([
+		{ id: 'adjustments', label: m.image_editor_adjustments() },
+		{ id: 'curves', label: m['video_editor_gpu_effect_gpu-curves']() },
+		{ id: 'wheels', label: m['video_editor_gpu_effect_gpu-color-wheels']() },
+		{ id: 'scopes', label: m.video_editor_scopes() }
+	]);
+	const imageAdjustmentKeys = [...EDITOR_COLOR_ADJUSTMENT_KEYS, 'blur'] satisfies Array<
+		Exclude<keyof ImageEditorImageAdjustments, 'wheels' | 'curves'>
+	>;
+	function adjustmentLabel(
+		key: Exclude<keyof ImageEditorImageAdjustments, 'wheels' | 'curves'>
+	): string {
+		if (key === 'brightness') return m.image_editor_brightness();
+		if (key === 'exposure') return m.image_editor_exposure();
+		if (key === 'contrast') return m.image_editor_contrast();
+		if (key === 'highlights') return m.image_editor_highlights();
+		if (key === 'shadows') return m.image_editor_shadows();
+		if (key === 'temperature') return m.image_editor_temperature();
+		if (key === 'tint') return m.image_editor_tint();
+		if (key === 'vibrance') return m.image_editor_vibrance();
+		if (key === 'saturation') return m.image_editor_saturation();
+		if (key === 'hue') return m.image_editor_hue();
+		return m.image_editor_blur();
+	}
+	const adjustmentGroups: Array<{
+		label: string;
+		controls: AdjustmentControl[];
+		pageSupported: boolean;
+	}> = [
+		...EDITOR_COLOR_ADJUSTMENT_GROUPS.map((group) => ({
+			label: group.id === 'tone' ? m.image_editor_tone() : m.image_editor_color(),
+			pageSupported: true,
+			controls: group.keys.map(
+				(key): AdjustmentControl => [
+					adjustmentLabel(key),
+					key,
+					EDITOR_COLOR_ADJUSTMENT_RANGES[key].min,
+					EDITOR_COLOR_ADJUSTMENT_RANGES[key].max
+				]
+			)
+		})),
+		{
+			label: m.image_editor_detail(),
+			pageSupported: false,
+			controls: [[m.image_editor_blur(), 'blur', 0, 1]]
+		}
+	];
+
+	const selectedImageLayers = $derived(
+		editor.selectedLayers.filter(
+			(layer) => layer.type === 'image' && layer.image && !editor.isLayerLocked(layer.id)
+		)
+	);
+	const pageImageLayers = $derived(
+		(editor.activePage?.layers ?? []).filter(
+			(layer) => layer.type === 'image' && layer.image && !editor.isLayerLocked(layer.id)
+		)
+	);
+	const targetLayers = $derived(scope === 'page' ? pageImageLayers : selectedImageLayers);
+	const targetLayerIDs = $derived(targetLayers.map((layer) => layer.id));
+	const activePage = $derived(editor.activePage);
+	const targetCount = $derived(scope === 'page' ? (activePage ? 1 : 0) : targetLayers.length);
+	const hasGrade = $derived(
+		scope === 'page'
+			? hasEditorColorGrade(activePage?.color_grade)
+			: targetLayers.some((layer) => hasEditorColorGrade(layer.image?.adjustments))
+	);
+	const grade = $derived(
+		scope === 'page' ? activePage?.color_grade : targetLayers[0]?.image?.adjustments
+	);
+	const wheelLabels = $derived({
+		lift: m.video_editor_gpu_param_lift(),
+		gamma: m.video_editor_gpu_param_gamma(),
+		gain: m.video_editor_gpu_param_gain(),
+		offset: m.video_editor_gpu_param_offset()
+	});
+	const wheels = $derived(grade?.wheels ?? defaultEditorColorWheels());
+	const curves = $derived({
+		enabled: editor.canEdit,
+		id: `${scope}:${scope === 'page' ? activePage?.id : targetLayerIDs.join(',')}`,
+		params: { ...grade?.curves }
+	});
+	function previewTools(
+		key: 'wheels' | 'curves',
+		updates: Partial<EditorColorWheels> | ColorCurveValues
+	) {
+		setComparison('after');
+		const value =
+			key === 'curves'
+				? Object.fromEntries(
+						Object.entries(updates).filter(([name]) =>
+							['masterPoints', 'redPoints', 'greenPoints', 'bluePoints'].includes(name)
+						)
+					)
+				: updates;
+		if (scope === 'page') {
+			if (!activePage) return;
+			if (key === 'wheels')
+				editor.previewPageColorGrade(activePage.id, 'wheels', { ...wheels, ...value });
+			else editor.previewPageColorGrade(activePage.id, 'curves', { ...grade?.curves, ...value });
+		} else editor.previewImageColorTools(targetLayerIDs, key, value);
+	}
+	function finishTools() {
+		if (scope === 'page') editor.commitPageColorGradeGesture();
+		else editor.commitImageAdjustmentGesture();
+	}
+	function cancelTools() {
+		if (scope === 'page') editor.cancelPageColorGradeGesture();
+		else editor.cancelImageAdjustmentGesture();
+	}
+	function wheelMixed(hue: keyof EditorColorWheels, amount: keyof EditorColorWheels) {
+		return (
+			scope === 'layer' &&
+			targetLayers.some((layer) => {
+				const other = layer.image?.adjustments.wheels ?? defaultEditorColorWheels();
+				return other[hue] !== wheels[hue] || other[amount] !== wheels[amount];
+			})
+		);
+	}
+
+	$effect(() => {
+		if (!editor.colorComparisonBefore) return;
+		if (!hasGrade) {
+			setComparison('after');
+			return;
+		}
+		editor.colorComparisonPage = scope === 'page';
+		editor.colorComparisonLayerIDs = scope === 'layer' ? [...targetLayerIDs] : [];
+	});
+
+	onDestroy(() => {
+		editor.cancelImageAdjustmentGesture();
+		editor.cancelPageColorGradeGesture();
+	});
+
+	function adjustmentValue(
+		key: Exclude<keyof ImageEditorImageAdjustments, 'wheels' | 'curves'>
+	): number | null {
+		if (scope === 'page') {
+			if (key === 'blur') return 0;
+			return activePage?.color_grade?.[key] ?? 0;
+		}
+		const mixed = imageEditorMixedValue(
+			targetLayers.map((layer) => layer.image?.adjustments[key] ?? 0)
+		);
+		return mixed.mixed ? null : (mixed.value ?? 0);
+	}
+
+	function previewAdjustment(
+		key: Exclude<keyof ImageEditorImageAdjustments, 'wheels' | 'curves'>,
+		value: number
+	): void {
+		setComparison('after');
+		if (scope === 'page') {
+			if (key !== 'blur' && activePage) editor.previewPageColorGrade(activePage.id, key, value);
+			return;
+		}
+		editor.previewImageAdjustment(targetLayerIDs, key, value);
+	}
+
+	function commitAdjustment(
+		key: Exclude<keyof ImageEditorImageAdjustments, 'wheels' | 'curves'>,
+		value: number
+	): void {
+		previewAdjustment(key, value);
+		if (scope === 'page') editor.commitPageColorGradeGesture();
+		else editor.commitImageAdjustmentGesture();
+	}
+
+	function applyPreset(adjustments: Partial<ImageEditorImageAdjustments>): void {
+		setComparison('after');
+		if (scope === 'page') {
+			if (!activePage) return;
+			editor.mutate(m.image_editor_adjustments(), (document) => {
+				const page = document.pages.find((candidate) => candidate.id === activePage.id);
+				if (!page) return;
+				page.color_grade_version = IMAGE_COLOR_GRADE_VERSION;
+				page.color_grade = { ...defaultEditorColorGradeAdjustments(), ...adjustments };
+			});
+			return;
+		}
+		const ids = new Set(targetLayerIDs);
+		if (ids.size === 0) return;
+		editor.mutate(m.image_editor_adjustments(), (document) => {
+			for (const page of document.pages) {
+				for (const layer of page.layers) {
+					if (!ids.has(layer.id) || editor.isLayerLocked(layer.id) || !layer.image) continue;
+					layer.image.color_grade_version = IMAGE_COLOR_GRADE_VERSION;
+					layer.image.adjustments = { ...defaultImageAdjustments(), ...adjustments };
+				}
+			}
+		});
+	}
+
+	function presetIsActive(adjustments: Partial<ImageEditorImageAdjustments>): boolean {
+		if (grade?.wheels || grade?.curves) return false;
+		const target = {
+			...(scope === 'page' ? defaultEditorColorGradeAdjustments() : defaultImageAdjustments()),
+			...adjustments
+		};
+		if (scope === 'page') {
+			if (!activePage) return false;
+			return imageAdjustmentKeys
+				.filter((key) => key !== 'blur')
+				.every(
+					(key) => Math.abs((activePage.color_grade?.[key] ?? 0) - (target[key] ?? 0)) < 0.001
+				);
+		}
+		if (targetLayers.length === 0) return false;
+		return targetLayers.every(
+			(layer) =>
+				!layer.image?.adjustments.wheels &&
+				!layer.image?.adjustments.curves &&
+				imageAdjustmentKeys.every(
+					(key) => Math.abs((layer.image?.adjustments[key] ?? 0) - (target[key] ?? 0)) < 0.001
+				)
+		);
+	}
+
+	function setScope(next: ColorScope): void {
+		editor.commitImageAdjustmentGesture();
+		editor.commitPageColorGradeGesture();
+		setComparison('after');
+		editor.colorWorkspaceScope = next;
+	}
+
+	function setComparison(mode: EditorColorComparisonMode): void {
+		const comparingBefore = mode === 'before';
+		editor.colorComparisonBefore = comparingBefore;
+		editor.colorComparisonPage = comparingBefore && scope === 'page';
+		editor.colorComparisonLayerIDs =
+			comparingBefore && scope === 'layer' ? [...targetLayerIDs] : [];
+	}
+</script>
+
+<Tabs.Root
+	bind:value={editor.colorWorkspaceTool}
+	class="h-full min-h-0 gap-0"
+	data-image-color-workspace
+>
+	<div class="shrink-0 border-b p-2">
+		<Tabs.List class="grid h-auto w-full grid-cols-4 md:h-auto" aria-label={m.image_editor_color()}>
+			{#each tools as tool (tool.id)}
+				<Tabs.Trigger
+					value={tool.id}
+					class="min-h-11 min-w-0 px-1 text-xs whitespace-normal md:min-h-11"
+					>{tool.label}</Tabs.Trigger
+				>
+			{/each}
+		</Tabs.List>
+	</div>
+	<div
+		class="image-editor-properties-scroll min-h-0 flex-1 space-y-4 overflow-x-hidden overflow-y-auto p-3"
+		bind:this={toolScroller}
+	>
+		<div class="space-y-2">
+			<div
+				class="grid grid-cols-2 overflow-hidden rounded-md border"
+				role="group"
+				aria-label={m.image_editor_color()}
+			>
+				<Button
+					type="button"
+					variant={scope === 'layer' ? 'secondary' : 'ghost'}
+					class="rounded-none"
+					aria-pressed={scope === 'layer'}
+					onclick={() => setScope('layer')}
+				>
+					{m.image_editor_layers()}
+				</Button>
+				<Button
+					type="button"
+					variant={scope === 'page' ? 'secondary' : 'ghost'}
+					class="rounded-none border-l"
+					aria-pressed={scope === 'page'}
+					onclick={() => setScope('page')}
+				>
+					{m.image_editor_page()}
+				</Button>
+			</div>
+			<p class="text-xs text-muted-foreground" aria-live="polite">
+				{scope === 'page'
+					? (activePage?.name ?? m.image_editor_page())
+					: m.image_editor_selected_count({ count: targetCount })}
+			</p>
+		</div>
+
+		{#if targetCount === 0}
+			<p class="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+				{m.image_editor_command_requires_selection()}
+			</p>
+		{:else}
+			<Tabs.Content value="adjustments" class="space-y-5">
+				{#if editor.colorWorkspaceTool === 'adjustments'}
+					<section class="space-y-2">
+						<h3 class="text-xs font-medium">{m.image_editor_quick_looks()}</h3>
+						<div class="grid grid-cols-3 gap-1">
+							{#each EDITOR_COLOR_GRADE_PRESETS as preset (preset.id)}
+								<Button
+									type="button"
+									variant={presetIsActive(preset.adjustments) ? 'secondary' : 'outline'}
+									size="xs"
+									disabled={!editor.canEdit}
+									aria-pressed={presetIsActive(preset.adjustments)}
+									onclick={() => applyPreset(preset.adjustments)}
+								>
+									{editorColorGradePresetLabel(preset.id)}
+								</Button>
+							{/each}
+						</div>
+					</section>
+
+					{#each adjustmentGroups.filter((group) => scope === 'layer' || group.pageSupported) as group (group.label)}
+						<section class="space-y-3 border-t pt-4">
+							<h3 class="text-xs font-medium">{group.label}</h3>
+							{#each group.controls as [label, key, min, max] (key)}
+								<SliderRow
+									{label}
+									value={adjustmentValue(key)}
+									{min}
+									{max}
+									step={0.01}
+									precision={0}
+									displayScale={100}
+									valueWidth="4rem"
+									placeholder={m.image_editor_mixed_value()}
+									resetValue={0}
+									resetLabel={m.image_editor_reset()}
+									disabled={!editor.canEdit}
+									onbegin={() => {
+										if (scope === 'page') {
+											if (key !== 'blur' && activePage)
+												editor.beginPageColorGradeGesture(activePage.id, key);
+										} else editor.beginImageAdjustmentGesture(targetLayerIDs, key);
+									}}
+									onValueChange={(value) => previewAdjustment(key, value)}
+									onValueCommit={(value) => commitAdjustment(key, value)}
+									onValueCancel={() => {
+										if (scope === 'page') editor.cancelPageColorGradeGesture();
+										else editor.cancelImageAdjustmentGesture();
+									}}
+								/>
+							{/each}
+						</section>
+					{/each}
+				{/if}
+			</Tabs.Content>
+			<Tabs.Content value="curves">
+				{#if editor.colorWorkspaceTool === 'curves'}
+					<section class="video-editor-theme min-w-0">
+						<fieldset disabled={!editor.canEdit}>
+							<EditorColorCurves
+								gpuEffect={curves}
+								bind:activeChannel={editor.colorCurveChannel}
+								ondraft={(params) => {
+									if (params) previewTools('curves', params);
+									else cancelTools();
+								}}
+								oncommit={(params) => {
+									previewTools('curves', params);
+									finishTools();
+								}}
+							/>
+						</fieldset>
+					</section>
+				{/if}
+			</Tabs.Content>
+			<Tabs.Content value="wheels">
+				{#if editor.colorWorkspaceTool === 'wheels'}
+					<section class="grid grid-cols-2 gap-x-4 gap-y-3">
+						{#each EDITOR_COLOR_WHEELS as descriptor (descriptor.hue)}
+							<div class="min-w-0 space-y-2">
+								<div class="flex items-center justify-between text-xs">
+									<span>{wheelLabels[descriptor.level]}</span>
+									<Button
+										size="xs"
+										variant="ghost"
+										disabled={!editor.canEdit}
+										aria-label={`${m.image_editor_reset()} ${wheelLabels[descriptor.level]}`}
+										onclick={() => {
+											const defaults = defaultEditorColorWheels();
+											previewTools('wheels', {
+												[descriptor.hue]: defaults[descriptor.hue],
+												[descriptor.amount]: defaults[descriptor.amount],
+												[descriptor.level]: defaults[descriptor.level]
+											});
+											finishTools();
+										}}>{m.image_editor_reset()}</Button
+									>
+								</div>
+								<div class="relative mx-auto aspect-square w-full max-w-32">
+									<EditorColorWheel
+										label={wheelLabels[descriptor.level]}
+										value={{ hue: wheels[descriptor.hue], amount: wheels[descriptor.amount] }}
+										disabled={!editor.canEdit}
+										mixed={wheelMixed(descriptor.hue, descriptor.amount)}
+										onpreview={(value) =>
+											previewTools('wheels', {
+												[descriptor.hue]: value.hue,
+												[descriptor.amount]: value.amount
+											})}
+										oncommit={(value) => {
+											previewTools('wheels', {
+												[descriptor.hue]: value.hue,
+												[descriptor.amount]: value.amount
+											});
+											finishTools();
+										}}
+										oncancel={cancelTools}
+									/>
+								</div>
+								<SliderRow
+									showLabel={false}
+									label={wheelLabels[descriptor.level]}
+									value={wheelMixed(descriptor.level, descriptor.level)
+										? null
+										: wheels[descriptor.level]}
+									min={descriptor.ring.min}
+									max={descriptor.ring.max}
+									step={0.01}
+									precision={2}
+									valueWidth="4rem"
+									resetValue={defaultEditorColorWheels()[descriptor.level]}
+									resetLabel={m.image_editor_reset()}
+									placeholder={m.image_editor_mixed_value()}
+									disabled={!editor.canEdit}
+									onValueChange={(value) => previewTools('wheels', { [descriptor.level]: value })}
+									onValueCommit={(value) => {
+										previewTools('wheels', { [descriptor.level]: value });
+										finishTools();
+									}}
+									onValueCancel={cancelTools}
+								/>
+							</div>
+						{/each}
+					</section>
+				{/if}
+			</Tabs.Content>
+			<Tabs.Content value="scopes">
+				{#if editor.colorWorkspaceTool === 'scopes'}
+					<section
+						class="video-editor-theme h-60 min-w-0 overflow-hidden rounded-md border"
+						aria-label={m.video_editor_scopes()}
+					>
+						<EditorColorScopes
+							itemId={activePage?.id ?? null}
+							sample={editor.colorScopeSample}
+							embedded
+						/>
+					</section>
+				{/if}
+			</Tabs.Content>
+		{/if}
+	</div>
+	<div class="shrink-0 border-t bg-card p-2">
+		<EditorColorComparison
+			mode={editor.colorComparisonBefore ? 'before' : 'after'}
+			disabled={!hasGrade}
+			ariaLabel={m.video_editor_color_compare_mode()}
+			afterLabel={m.video_editor_color_after()}
+			beforeLabel={m.video_editor_color_before()}
+			onmodechange={setComparison}
+		/>
+	</div>
+</Tabs.Root>

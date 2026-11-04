@@ -1,0 +1,106 @@
+import { describe, expect, it, vi } from "vitest";
+import { HttpClient } from "./client";
+import { OpenPostError } from "./errors";
+import { readFileSync } from "node:fs";
+const metadata = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+import { OpenPost } from "./index";
+
+function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json", ...headers },
+  });
+}
+
+describe("HttpClient", () => {
+  it("sends the bearer token, workspace-agnostic paths, and SDK user agent", async () => {
+    const fetch = vi.fn(async () => jsonResponse({ ok: true }));
+    const http = new HttpClient({ baseUrl: "https://example.test/", token: "tok", fetch });
+    await http.get("/api/v1/workspaces");
+
+    expect(fetch).toHaveBeenCalledOnce();
+    const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://example.test/api/v1/workspaces");
+    const headers = init.headers as Record<string, string>;
+    expect(headers["Authorization"]).toBe("Bearer tok");
+    expect(headers["User-Agent"]).toBe(`openpost-sdk/${metadata.version}`);
+  });
+
+  it("throws missing_config without a token", async () => {
+    const fetch = vi.fn(async () => jsonResponse({}));
+    const http = new HttpClient({ baseUrl: "https://example.test", fetch });
+    const error = await http.get("/api/v1/workspaces").catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(OpenPostError);
+    expect((error as OpenPostError).code).toBe("missing_config");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("maps HTTP statuses to typed error codes", async () => {
+    const fetch = vi.fn(async () => jsonResponse({ title: "Nope", detail: "Gone" }, 404));
+    const http = new HttpClient({ baseUrl: "https://example.test", token: "tok", fetch });
+    const error = await http.get("/api/v1/workspaces").catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(OpenPostError);
+    expect((error as OpenPostError).code).toBe("not_found");
+    expect((error as OpenPostError).status).toBe(404);
+    expect((error as OpenPostError).message).toBe("Gone");
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("retries once on a 500 and then returns the recovery", async () => {
+    const fetch = vi
+      .fn(async () => jsonResponse({ title: "boom" }, 500))
+      .mockImplementationOnce(async () => jsonResponse({ title: "boom" }, 500))
+      .mockImplementationOnce(async () => jsonResponse([{ id: "w1" }]));
+    const http = new HttpClient({ baseUrl: "https://example.test", token: "tok", fetch });
+    const result = await http.get("/api/v1/workspaces");
+    expect(result).toEqual([{ id: "w1" }]);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry mutations on a 500", async () => {
+    const fetch = vi.fn(async () => jsonResponse({ title: "boom" }, 500));
+    const http = new HttpClient({ baseUrl: "https://example.test", token: "tok", fetch });
+    await expect(http.post("/api/v1/publications", {})).rejects.toBeInstanceOf(OpenPostError);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("times out when a public SDK response body never finishes", async () => {
+    let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          bodyController = controller;
+          init?.signal?.addEventListener(
+            "abort",
+            () => controller.error(new DOMException("The operation was aborted", "AbortError")),
+            { once: true },
+          );
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    const client = new OpenPost({
+      baseUrl: "https://example.test",
+      token: "tok",
+      timeoutMs: 10,
+      fetch,
+    });
+    const pending = client.workspaces.list();
+    const outcome = await Promise.race([
+      pending.then(
+        () => "resolved" as const,
+        (error: unknown) => error,
+      ),
+      new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 40)),
+    ]);
+
+    if (outcome === "pending") bodyController?.close();
+    if (outcome === "pending") await pending.catch(() => undefined);
+
+    expect(outcome).toBeInstanceOf(OpenPostError);
+    expect((outcome as OpenPostError).code).toBe("timeout");
+  });
+});

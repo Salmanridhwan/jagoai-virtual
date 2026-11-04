@@ -1,0 +1,16 @@
+{
+  "title": "Image Editor",
+  "icon": "Paintbrush",
+  "root": true,
+  "pages": [
+    "index",
+    "create-a-design",
+    "layers",
+    "pages-and-carousels",
+    "color-and-effects",
+    "ai-images",
+    "templates-and-brand",
+    "export-and-publish",
+    "saving-and-recovery"
+  ]
+}

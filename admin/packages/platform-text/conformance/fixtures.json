@@ -1,0 +1,266 @@
+{
+  "$comment": "Shared platform-text conformance fixture: the single maintained record of cross-language text limits and counting expectations. TypeScript (packages/platform-text) and Go (capabilities/providerlimits) assert against this file; scripts/check-platform-text-conformance.mjs asserts the two implementations agree directly.",
+  "constants": {
+    "x_standard_char_limit": 280,
+    "x_premium_char_limit": 25000,
+    "youtube_description_max_bytes": 5000,
+    "x_transformed_url_length": 23,
+    "mastodon_url_length": 23
+  },
+  "limits": {
+    "x": 280,
+    "mastodon": 500,
+    "pixelfed": 500,
+    "peertube": 5000,
+    "lemmy": 50000,
+    "piefed": 50000,
+    "bluesky": 300,
+    "linkedin": 3000,
+    "threads": 500,
+    "facebook": 63206,
+    "instagram": 2200,
+    "tiktok": 2200,
+    "youtube": 5000,
+    "pinterest": 800,
+    "telegram": 4096,
+    "discord": 2000,
+    "devnull": 4000
+  },
+  "counts": [
+    {
+      "platform": "x",
+      "text": "Hello, world!",
+      "expected": 13
+    },
+    {
+      "platform": "x",
+      "text": "Hello, world! 👋",
+      "expected": 16
+    },
+    {
+      "platform": "x",
+      "text": "👨‍👩‍👧‍👦",
+      "expected": 2
+    },
+    {
+      "platform": "x",
+      "text": "🇵🇹",
+      "expected": 2
+    },
+    {
+      "platform": "x",
+      "text": "日本語",
+      "expected": 6
+    },
+    {
+      "platform": "x",
+      "text": "See https://example.com/this/is/a/long/path",
+      "expected": 27
+    },
+    {
+      "platform": "x",
+      "text": "See https://en.wikipedia.org/wiki/Foo_(bar)",
+      "expected": 27
+    },
+    {
+      "platform": "x",
+      "text": "See https://en.wikipedia.org/wiki/Foo_(bar).",
+      "expected": 28
+    },
+    {
+      "platform": "x",
+      "text": "(https://example.com/path)",
+      "expected": 25
+    },
+    {
+      "platform": "x",
+      "text": "café",
+      "expected": 4
+    },
+    {
+      "platform": "x",
+      "text": "café",
+      "expected": 4
+    },
+    {
+      "platform": "x",
+      "text": "Visit www.example.com/this/is/a/long/path ok",
+      "expected": 32
+    },
+    {
+      "platform": "x",
+      "text": "See https://example.com/path, ok",
+      "expected": 31
+    },
+    {
+      "platform": "x",
+      "text": "CJK https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 日本語",
+      "expected": 34
+    },
+    {
+      "platform": "mastodon",
+      "text": "Hello, world!",
+      "expected": 13
+    },
+    {
+      "platform": "mastodon",
+      "text": "Read https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": 28
+    },
+    {
+      "platform": "mastodon",
+      "text": "See https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.",
+      "expected": 28
+    },
+    {
+      "platform": "mastodon",
+      "text": "www.example.com",
+      "expected": 15
+    },
+    {
+      "platform": "mastodon",
+      "text": "https://en.wikipedia.org/wiki/Foo_(bar)",
+      "expected": 23
+    },
+    {
+      "platform": "mastodon",
+      "text": "(https://example.com/path)",
+      "expected": 25
+    },
+    {
+      "platform": "mastodon",
+      "text": "https://intranet/page",
+      "expected": 21
+    },
+    {
+      "platform": "mastodon",
+      "text": "@alice@example.social hi",
+      "expected": 9
+    },
+    {
+      "platform": "mastodon",
+      "text": "@alice hi",
+      "expected": 9
+    },
+    {
+      "platform": "mastodon",
+      "text": "https://example.com/path, ok",
+      "expected": 27
+    },
+    {
+      "platform": "mastodon",
+      "text": "@bob@mas.to hello https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.",
+      "expected": 35
+    },
+    {
+      "platform": "bluesky",
+      "text": "Hello, world!",
+      "expected": 13
+    },
+    {
+      "platform": "bluesky",
+      "text": "日本語",
+      "expected": 3
+    },
+    {
+      "platform": "bluesky",
+      "text": "café",
+      "expected": 4
+    },
+    {
+      "platform": "bluesky",
+      "text": "👍🏽",
+      "expected": 1
+    },
+    {
+      "platform": "bluesky",
+      "text": "🇵🇹",
+      "expected": 1
+    },
+    {
+      "platform": "bluesky",
+      "text": "👨‍👩‍👧‍👦",
+      "expected": 1
+    },
+    {
+      "platform": "threads",
+      "text": "OpenPost",
+      "expected": 8
+    },
+    {
+      "platform": "threads",
+      "text": "é",
+      "expected": 2
+    },
+    {
+      "platform": "threads",
+      "text": "’",
+      "expected": 3
+    },
+    {
+      "platform": "threads",
+      "text": "👋",
+      "expected": 4
+    },
+    {
+      "platform": "youtube",
+      "text": "  hello  ",
+      "expected": 5
+    },
+    {
+      "platform": "youtube",
+      "text": "é",
+      "expected": 2
+    },
+    {
+      "platform": "devnull",
+      "text": "Hello, world!",
+      "expected": 13
+    },
+    {
+      "platform": "devnull",
+      "text": "héllo 👋",
+      "expected": 7
+    },
+    {
+      "platform": "bluesky",
+      "text": "café",
+      "expected": 4
+    },
+    {
+      "platform": "threads",
+      "text": "👨‍👩‍👧‍👦",
+      "expected": 25
+    },
+    {
+      "platform": "mastodon",
+      "text": "日本語",
+      "expected": 3
+    },
+    {
+      "platform": "mastodon",
+      "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": 474
+    },
+    {
+      "platform": "youtube",
+      "text": "OpenPost",
+      "expected": 8
+    },
+    {
+      "platform": "youtube",
+      "text": "’",
+      "expected": 3
+    },
+    {
+      "platform": "youtube",
+      "text": "👋",
+      "expected": 4
+    },
+    {
+      "platform": "youtube",
+      "text": "👨‍👩‍👧‍👦",
+      "expected": 25
+    }
+  ]
+}

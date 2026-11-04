@@ -1,0 +1,696 @@
+package platform
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+)
+
+func TestTikTokPhotoValidationRejectsOversizedShortSide(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		media        MediaItem
+		shouldReject bool
+	}{
+		{name: "portrait oversized", media: MediaItem{ID: "portrait", MimeType: "image/jpeg", Width: 2172, Height: 2896}, shouldReject: true},
+		{name: "landscape oversized", media: MediaItem{ID: "landscape", MimeType: "image/webp", Width: 2896, Height: 2172}, shouldReject: true},
+		{name: "exact boundary", media: MediaItem{ID: "boundary", MimeType: "image/jpeg", Width: 1080, Height: 1440}},
+		{name: "unknown dimensions", media: MediaItem{ID: "legacy", MimeType: "image/jpeg"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			issues := validateTikTokMedia([]MediaItem{test.media})
+			if test.shouldReject {
+				if len(issues) != 1 || issues[0].MediaID != test.media.ID || !strings.Contains(issues[0].Message, "1080 pixels on the shorter side") {
+					t.Fatalf("unexpected validation issues: %#v", issues)
+				}
+			} else if len(issues) != 0 {
+				t.Fatalf("unexpected validation issues: %#v", issues)
+			}
+		})
+	}
+}
+
+func TestTikTokPhotoPublishRejectsOversizedShortSideBeforeProviderIO(t *testing.T) {
+	originalClient := httpClient
+	t.Cleanup(func() { httpClient = originalClient })
+	httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		t.Fatalf("oversized image reached provider I/O: %s", req.URL)
+		return nil, nil
+	})}
+	_, err := NewTikTokAdapter("", "", "").publishPhotoPost(t.Context(), "token", &PublishRequest{
+		PlatformMediaIDs: []string{"https://media.example/photo.jpg"},
+		Media:            []MediaItem{{ID: "photo-1", MimeType: "image/jpeg", Width: 1081, Height: 1441}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "1080 pixels on the shorter side") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestTikTokGenerateAuthURL(t *testing.T) {
+	adapter := NewTikTokAdapter("client-key", "client-secret", "https://app.example/api/v1/accounts/tiktok/callback")
+
+	authURL, _ := adapter.GenerateAuthURL("state-123")
+	parsed, err := url.Parse(authURL)
+	if err != nil {
+		t.Fatalf("parsing auth url: %v", err)
+	}
+
+	if parsed.Scheme != "https" || parsed.Host != "www.tiktok.com" || parsed.Path != "/v2/auth/authorize/" {
+		t.Fatalf("unexpected auth url %s", authURL)
+	}
+	query := parsed.Query()
+	if query.Get("client_key") != "client-key" {
+		t.Fatalf("expected client_key, got %q", query.Get("client_key"))
+	}
+	if query.Get("redirect_uri") != "https://app.example/api/v1/accounts/tiktok/callback" {
+		t.Fatalf("unexpected redirect uri %q", query.Get("redirect_uri"))
+	}
+	if query.Get("response_type") != "code" {
+		t.Fatalf("unexpected response_type %q", query.Get("response_type"))
+	}
+	if query.Get("state") != "state-123" {
+		t.Fatalf("unexpected state %q", query.Get("state"))
+	}
+	if !strings.Contains(query.Get("scope"), "video.publish") {
+		t.Fatalf("expected video.publish scope, got %q", query.Get("scope"))
+	}
+	if !strings.Contains(query.Get("scope"), "user.info.stats") || !strings.Contains(query.Get("scope"), "video.list") {
+		t.Fatalf("expected analytics read scopes, got %q", query.Get("scope"))
+	}
+}
+
+func TestTikTokScopeCapabilitiesSplitRequiredFromOptional(t *testing.T) {
+	required := TikTokRequiredPublishingScopes()
+	if len(required) != 3 || required[0] != "user.info.basic" || required[1] != "video.publish" || required[2] != "video.upload" {
+		t.Fatalf("unexpected minimal publishing scopes: %q", required)
+	}
+
+	optional := TikTokOptionalDisplayScopes()
+	if len(optional) != 3 || optional[0] != "user.info.profile" || optional[1] != "user.info.stats" || optional[2] != "video.list" {
+		t.Fatalf("unexpected optional display scopes: %q", optional)
+	}
+
+	def := TikTokDefaultScopeCapabilities().Scopes()
+	want := []string{"user.info.basic", "user.info.profile", "user.info.stats", "video.list", "video.publish", "video.upload"}
+	if strings.Join(def, ",") != strings.Join(want, ",") {
+		t.Fatalf("default scope set changed: got %q want %q", def, want)
+	}
+
+	minimal := TikTokDefaultScopeCapabilities().WithoutDisplayAPI().Scopes()
+	if strings.Join(minimal, ",") != strings.Join(required, ",") {
+		t.Fatalf("display-disabled scope set is not the minimal publishing set: got %q", minimal)
+	}
+
+	for _, set := range [][]string{def, required, optional} {
+		seen := map[string]struct{}{}
+		for _, scope := range set {
+			if _, duplicate := seen[scope]; duplicate {
+				t.Fatalf("duplicate scope %q in %q", scope, set)
+			}
+			seen[scope] = struct{}{}
+		}
+	}
+}
+
+func TestTikTokAdapterAlwaysRequestsBothPublishingScopes(t *testing.T) {
+	for _, capabilities := range []TikTokScopeCapabilities{
+		{Profile: true},
+		{DirectPost: true},
+	} {
+		adapter := NewTikTokAdapterWithCapabilities("key", "secret", "https://app.example/callback", capabilities)
+		require.Contains(t, adapter.RequestedScopes(), "video.publish")
+		require.Contains(t, adapter.RequestedScopes(), "video.upload")
+	}
+}
+
+func mustParseQuery(t *testing.T, raw string) url.Values {
+	t.Helper()
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parsing auth url: %v", err)
+	}
+	return parsed.Query()
+}
+
+func TestTikTokGetProfileFallsBackToBasicFieldsWithoutDisplayGrant(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			originalClient := httpClient
+			t.Cleanup(func() { httpClient = originalClient })
+			calls := 0
+			httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				switch req.URL.String() {
+				case "https://open.tiktokapis.com/v2/user/info/?fields=open_id,union_id,avatar_url,display_name,username":
+					require.Equal(t, 1, calls)
+					return jsonResponseWithStatus(req, status, `{"data":{},"error":{"code":"scope_not_authorized","message":"scope not authorized","log_id":"log"}}`), nil
+				case "https://open.tiktokapis.com/v2/user/info/?fields=open_id,union_id,avatar_url,display_name":
+					require.Equal(t, 2, calls)
+					return jsonResponse(req, `{"data":{"user":{"open_id":"open-1","display_name":"Creator","avatar_url":"https://cdn.tiktok.example/avatar.jpg"}},"error":{"code":"ok"}}`), nil
+				default:
+					t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+					return nil, nil
+				}
+			})}
+			profile, err := NewTikTokAdapter("key", "secret", "https://app.example/callback").GetProfile(t.Context(), "access")
+			require.NoError(t, err)
+			require.Equal(t, 2, calls)
+			require.Equal(t, "open-1", profile.ID)
+			require.Equal(t, "Creator", profile.DisplayName)
+			require.Equal(t, "unavailable", profile.CapabilityState["tiktok_display_profile"])
+		})
+	}
+}
+
+func TestTikTokGetProfileWithoutDisplayAPIRequestsOnlyBasicIdentity(t *testing.T) {
+	originalClient := httpClient
+	t.Cleanup(func() { httpClient = originalClient })
+	calls := 0
+	httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		require.Equal(t, "GET", req.Method)
+		require.Equal(t, "https://open.tiktokapis.com/v2/user/info/", req.URL.Scheme+"://"+req.URL.Host+req.URL.Path)
+		require.Equal(t, "open_id,union_id,avatar_url,display_name", req.URL.Query().Get("fields"))
+		return jsonResponse(req, `{"data":{"user":{"open_id":"open-1","display_name":"Creator"}},"error":{"code":"ok"}}`), nil
+	})}
+	adapter := NewTikTokAdapterWithCapabilities("key", "secret", "https://app.example/callback", TikTokMinimalScopeCapabilities())
+	profile, err := adapter.GetProfile(t.Context(), "access")
+	require.NoError(t, err)
+	require.Equal(t, 1, calls)
+	require.Equal(t, "open-1", profile.ID)
+	require.Equal(t, "Creator", profile.DisplayName)
+	require.Equal(t, "unavailable", profile.CapabilityState["tiktok_display_profile"])
+}
+
+func TestTikTokGetProfileStillFailsForDeadToken(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusUnauthorized} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			originalClient := httpClient
+			t.Cleanup(func() { httpClient = originalClient })
+			calls := 0
+			httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				return jsonResponseWithStatus(req, status, `{"data":{},"error":{"code":"access_token_invalid","message":"invalid token","log_id":"log"}}`), nil
+			})}
+			_, err := NewTikTokAdapter("key", "secret", "https://app.example/callback").GetProfile(t.Context(), "access")
+			require.Error(t, err)
+			require.Equal(t, 1, calls, "dead token must not trigger a basic-fields retry")
+		})
+	}
+}
+
+func TestTikTokExchangeCodeAndProfile(t *testing.T) {
+	originalClient := httpClient
+	defer func() { httpClient = originalClient }()
+
+	httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case tiktokTokenURL:
+			if req.Method != http.MethodPost {
+				t.Fatalf("unexpected token method %s", req.Method)
+			}
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("reading token body: %v", err)
+			}
+			form, err := url.ParseQuery(string(body))
+			if err != nil {
+				t.Fatalf("parsing token form: %v", err)
+			}
+			if form.Get("client_key") != "client-key" || form.Get(oauthParamClientSecret) != "client-secret" {
+				t.Fatalf("unexpected client credentials in form: %s", string(body))
+			}
+			if form.Get(grantType) != oauthGrantAuthCode || form.Get(oauthParamCode) != "auth-code" {
+				t.Fatalf("unexpected grant/code in form: %s", string(body))
+			}
+			return jsonResponse(req, `{"access_token":"access","refresh_token":"refresh","expires_in":86400,"token_type":"Bearer","scope":"user.info.basic,video.publish","open_id":"open-1"}`), nil
+		case tiktokUserInfoURL:
+			if req.Header.Get(headerAuthorization) != bearerPrefix+"access" {
+				t.Fatalf("unexpected profile auth header %q", req.Header.Get(headerAuthorization))
+			}
+			return jsonResponse(req, `{"data":{"user":{"open_id":"open-1","display_name":"Creator","username":"creator","avatar_url":"https://cdn.tiktok.example/avatar.jpg"}},"error":{"code":"ok","message":"","log_id":"log"}}`), nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})}
+
+	adapter := NewTikTokAdapter("client-key", "client-secret", "https://app.example/callback")
+	token, err := adapter.ExchangeCode(context.Background(), "auth-code", nil)
+	if err != nil {
+		t.Fatalf("ExchangeCode returned error: %v", err)
+	}
+	if token.AccessToken != "access" || token.RefreshToken != "refresh" || token.Extra["open_id"] != "open-1" {
+		t.Fatalf("unexpected token result: %#v", token)
+	}
+
+	profile, err := adapter.GetProfile(context.Background(), token.AccessToken)
+	if err != nil {
+		t.Fatalf("GetProfile returned error: %v", err)
+	}
+	if profile.ID != "open-1" || profile.Username != "creator" || profile.DisplayName != "Creator" {
+		t.Fatalf("unexpected profile: %#v", profile)
+	}
+	if profile.AvatarURL != "https://cdn.tiktok.example/avatar.jpg" {
+		t.Fatalf("unexpected profile avatar: %#v", profile)
+	}
+}
+
+func TestTikTokPublishDirectVideoFromPublicURL(t *testing.T) {
+	originalClient := httpClient
+	defer func() { httpClient = originalClient }()
+
+	var initPayload map[string]any
+	httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Header.Get(headerAuthorization) != bearerPrefix+"access" {
+			t.Fatalf("unexpected auth header %q", req.Header.Get(headerAuthorization))
+		}
+		switch req.URL.String() {
+		case tiktokCreatorInfoURL:
+			return jsonResponse(req, `{"data":{"privacy_level_options":["SELF_ONLY","PUBLIC_TO_EVERYONE"]},"error":{"code":"ok"}}`), nil
+		case tiktokVideoInitURL:
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("reading init body: %v", err)
+			}
+			if err := json.Unmarshal(body, &initPayload); err != nil {
+				t.Fatalf("decoding init payload: %v", err)
+			}
+			return jsonResponse(req, `{"data":{"publish_id":"publish-1"},"error":{"code":"ok"}}`), nil
+		case tiktokPublishStatusURL:
+			return jsonResponse(req, `{"data":{"status":"PUBLISH_COMPLETE","publicly_available_post_id":["video-1"]},"error":{"code":"ok"}}`), nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})}
+
+	adapter := NewTikTokAdapter("client-key", "client-secret", "https://app.example/callback")
+	request := &PublishRequest{
+		Content:          "Launch video",
+		PlatformMediaIDs: []string{"https://media.example/video.mp4"},
+		Media:            []MediaItem{{ID: "media-1", MimeType: "video/mp4"}},
+		Settings: map[string]interface{}{
+			"content_posting_method": "DIRECT_POST",
+			"privacy_level":          "PUBLIC_TO_EVERYONE",
+		},
+	}
+	var checkpoints []PublishResult
+	request.SetWriteFence(func(PublishResult) error { return nil }, func(result PublishResult) error {
+		checkpoints = append(checkpoints, result)
+		return nil
+	})
+	externalID, err := adapter.Publish(context.Background(), "access", "open-1", request)
+	if err != nil {
+		t.Fatalf("Publish returned error: %v", err)
+	}
+	if externalID.ExternalID != "video-1" {
+		t.Fatalf("expected video id, got %q", externalID)
+	}
+	if len(checkpoints) != 2 || checkpoints[0].SubmissionState != PublishSubmissionPending ||
+		checkpoints[0].ProviderReference != "publish-1" || checkpoints[1].SubmissionState != PublishSubmissionAccepted {
+		t.Fatalf("unexpected durable publish checkpoints: %#v", checkpoints)
+	}
+
+	postInfo, ok := initPayload["post_info"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing post_info payload: %#v", initPayload)
+	}
+	if postInfo["privacy_level"] != "PUBLIC_TO_EVERYONE" || postInfo["title"] != "Launch video" {
+		t.Fatalf("unexpected post_info: %#v", postInfo)
+	}
+	sourceInfo, ok := initPayload["source_info"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing source_info payload: %#v", initPayload)
+	}
+	if sourceInfo["source"] != "PULL_FROM_URL" || sourceInfo["video_url"] != "https://media.example/video.mp4" {
+		t.Fatalf("unexpected source_info: %#v", sourceInfo)
+	}
+}
+
+func TestTikTokPublishDoesNotGuessPublicIdentityFromCaption(t *testing.T) {
+	originalClient := httpClient
+	defer func() { httpClient = originalClient }()
+	createdAt := time.Now().UTC().Add(-time.Minute).Unix()
+	httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case tiktokCreatorInfoURL:
+			return jsonResponse(req, `{"data":{"privacy_level_options":["PUBLIC_TO_EVERYONE"]},"error":{"code":"ok"}}`), nil
+		case tiktokVideoInitURL:
+			return jsonResponse(req, `{"data":{"publish_id":"publish-1"},"error":{"code":"ok"}}`), nil
+		case tiktokPublishStatusURL:
+			return jsonResponse(req, `{"data":{"status":"PUBLISH_COMPLETE"},"error":{"code":"ok"}}`), nil
+		case tiktokVideoListURL:
+			return jsonResponse(req, fmt.Sprintf(`{"data":{"videos":[{"id":"7511111111111111111","create_time":%d,"video_description":"Launch   video"}]},"error":{"code":"ok"}}`, createdAt)), nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})}
+	request := &PublishRequest{
+		Content: "Launch video", PlatformMediaIDs: []string{"https://media.example/video.mp4"},
+		Media:    []MediaItem{{ID: "media-1", MimeType: "video/mp4"}},
+		Settings: map[string]interface{}{"content_posting_method": "DIRECT_POST", "privacy_level": "PUBLIC_TO_EVERYONE"},
+	}
+	var checkpoints []PublishResult
+	request.SetWriteFence(func(PublishResult) error { return nil }, func(result PublishResult) error {
+		checkpoints = append(checkpoints, result)
+		return nil
+	})
+	result, err := NewTikTokAdapter("key", "secret", "https://app.example/callback").Publish(t.Context(), "access", "open-1", request)
+	if err != nil {
+		t.Fatalf("Publish returned error: %v", err)
+	}
+	if result.ExternalID != "" || result.ProviderReference != "publish-1" || result.SubmissionState != PublishSubmissionPending {
+		t.Fatalf("unconfirmed public identity must stay pending, got %#v", result)
+	}
+	if len(checkpoints) != 2 || checkpoints[1].ProviderState != "published_unresolved" || checkpoints[1].RetrySafety != PublishRetryReconcileOnly {
+		t.Fatalf("expected durable unresolved checkpoint, got %#v", checkpoints)
+	}
+}
+
+func TestTikTokPublishRequiresHTTPSVideoURL(t *testing.T) {
+	adapter := NewTikTokAdapter("client-key", "client-secret", "https://app.example/callback")
+	_, err := adapter.Publish(context.Background(), "access", "open-1", &PublishRequest{
+		Content:          "Launch video",
+		PlatformMediaIDs: []string{"http://media.example/video.mp4"},
+		Media:            []MediaItem{{ID: "media-1", MimeType: "video/mp4"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "publicly-accessible HTTPS") {
+		t.Fatalf("expected HTTPS URL error, got %v", err)
+	}
+}
+
+func TestValidateTikTokPublicMediaURLsRejectsUnsafeTargets(t *testing.T) {
+	if err := validateTikTokPublicMediaURLs([]string{"https://media.example/video.mp4"}); err != nil {
+		t.Fatalf("valid media URL rejected: %v", err)
+	}
+	if err := validateTikTokPublicMediaURLs([]string{"https://media.example:8443/video.mp4"}); err != nil {
+		t.Fatalf("custom-port media URL rejected: %v", err)
+	}
+	for _, raw := range []string{
+		"http://media.example/video.mp4",
+		"https://user:secret@media.example/video.mp4",
+		"https://media.example/video.mp4#fragment",
+		"not-a-url",
+		"",
+	} {
+		if err := validateTikTokPublicMediaURLs([]string{raw}); err == nil {
+			t.Fatalf("expected media URL %q to be rejected", raw)
+		}
+	}
+}
+
+func TestTikTokPublishRejectsUnsupportedPhotoMedia(t *testing.T) {
+	adapter := NewTikTokAdapter("client-key", "client-secret", "https://app.example/callback")
+
+	t.Run("PNG", func(t *testing.T) {
+		_, err := adapter.Publish(context.Background(), "access", "open-1", &PublishRequest{
+			Profile:          "carousel",
+			PlatformMediaIDs: []string{"https://media.example/photo.png"},
+			Media:            []MediaItem{{ID: "photo-1", MimeType: "image/png"}},
+		})
+		if err == nil || !strings.Contains(err.Error(), "JPEG or WebP") {
+			t.Fatalf("expected TikTok photo MIME error, got %v", err)
+		}
+	})
+
+	t.Run("more than 35 photos", func(t *testing.T) {
+		mediaURLs := make([]string, 36)
+		media := make([]MediaItem, 36)
+		for index := range media {
+			mediaURLs[index] = "https://media.example/photo.webp"
+			media[index] = MediaItem{ID: "photo", MimeType: "image/webp"}
+		}
+		_, err := adapter.Publish(context.Background(), "access", "open-1", &PublishRequest{
+			Profile:          "carousel",
+			PlatformMediaIDs: mediaURLs,
+			Media:            media,
+		})
+		if err == nil || !strings.Contains(err.Error(), "1-35 images") {
+			t.Fatalf("expected TikTok photo count error, got %v", err)
+		}
+	})
+}
+
+// TikTok's Media Transfer Guide: total_chunk_count is video_size divided by
+// chunk_size rounded down, every chunk is 5-64 MB except the final one, which
+// carries the trailing bytes (up to 128 MB), and a video over 64 MB must be
+// sent in more than one chunk.
+func TestTikTokFileUploadSendsTheChunksItDeclares(t *testing.T) {
+	originalClient := httpClient
+	defer func() { httpClient = originalClient }()
+
+	const uploadURL = "https://open-upload.tiktokapis.com/video/?upload_id=1"
+	const videoSize = tiktokMaxChunkSize + 3
+	var chunkSize, totalChunks int64
+	var puts []int64
+	var next int64
+	httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case tiktokVideoInboxInitURL:
+			var body struct {
+				SourceInfo struct {
+					VideoSize       int64 `json:"video_size"`
+					ChunkSize       int64 `json:"chunk_size"`
+					TotalChunkCount int64 `json:"total_chunk_count"`
+				} `json:"source_info"`
+			}
+			require.NoError(t, json.NewDecoder(req.Body).Decode(&body))
+			require.Equal(t, int64(videoSize), body.SourceInfo.VideoSize)
+			chunkSize, totalChunks = body.SourceInfo.ChunkSize, body.SourceInfo.TotalChunkCount
+			return jsonResponse(req, `{"data":{"publish_id":"publish-1","upload_url":"`+uploadURL+`"},"error":{"code":"ok"}}`), nil
+		case uploadURL:
+			size, err := io.Copy(io.Discard, req.Body)
+			require.NoError(t, err)
+			require.Equal(t, fmt.Sprintf("bytes %d-%d/%d", next, next+size-1, videoSize), req.Header.Get("Content-Range"))
+			next += size
+			puts = append(puts, size)
+			return jsonResponseWithStatus(req, http.StatusCreated, `{}`), nil
+		case tiktokPublishStatusURL:
+			return jsonResponse(req, `{"data":{"status":"SEND_TO_USER_INBOX"},"error":{"code":"ok"}}`), nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})}
+
+	publishID, err := NewTikTokAdapter("key", "secret", "https://app.example/callback").UploadMediaWithMetadata(t.Context(), "access", "open-1", UploadMediaRequest{
+		MimeType: "video/mp4",
+		Settings: map[string]interface{}{"content_posting_method": "MEDIA_UPLOAD"},
+		Reader:   bytes.NewReader(make([]byte, videoSize)),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "publish-1", publishID)
+	require.Equal(t, int64(videoSize), next)
+	require.Equal(t, videoSize/chunkSize, totalChunks, "total_chunk_count must be video_size / chunk_size rounded down")
+	require.Len(t, puts, int(totalChunks))
+	require.GreaterOrEqual(t, totalChunks, int64(2), "a video over 64 MB must be sent in several chunks")
+	for index, size := range puts[:len(puts)-1] {
+		require.Equal(t, chunkSize, size, "chunk %d", index)
+	}
+	require.GreaterOrEqual(t, chunkSize, int64(5*1024*1024))
+	require.LessOrEqual(t, chunkSize, int64(tiktokMaxChunkSize))
+	final := puts[len(puts)-1]
+	require.GreaterOrEqual(t, final, chunkSize, "the final chunk carries the trailing bytes")
+	require.LessOrEqual(t, final, int64(128*1024*1024))
+}
+
+func TestTikTokUploadChunksFollowTheTransferGuide(t *testing.T) {
+	const mib = 1024 * 1024
+	for _, videoSize := range []int64{1, 4 * mib, 64 * mib, 64*mib + 1, 100 * mib, 128 * mib, 130 * mib, 4 * 1024 * mib} {
+		chunkSize, totalChunks := tiktokUploadChunks(videoSize)
+		if videoSize <= tiktokMaxChunkSize {
+			require.Equal(t, videoSize, chunkSize, "size %d goes as a whole", videoSize)
+			require.Equal(t, int64(1), totalChunks, "size %d goes as a whole", videoSize)
+			continue
+		}
+		require.Equal(t, videoSize/chunkSize, totalChunks, "size %d", videoSize)
+		require.GreaterOrEqual(t, totalChunks, int64(2), "size %d", videoSize)
+		require.LessOrEqual(t, totalChunks, int64(1000), "size %d", videoSize)
+		require.GreaterOrEqual(t, chunkSize, int64(5*mib), "size %d", videoSize)
+		require.LessOrEqual(t, chunkSize, int64(tiktokMaxChunkSize), "size %d", videoSize)
+		final := videoSize - (totalChunks-1)*chunkSize
+		require.GreaterOrEqual(t, final, chunkSize, "size %d", videoSize)
+		require.LessOrEqual(t, final, int64(128*mib), "size %d", videoSize)
+	}
+}
+
+func jsonResponse(req *http.Request, body string) *http.Response {
+	return jsonResponseWithStatus(req, http.StatusOK, body)
+}
+
+func jsonResponseWithStatus(req *http.Request, statusCode int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: statusCode,
+		Header:     http.Header{"Content-Type": []string{contentTypeJSON}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    req,
+	}
+}
+
+func TestTikTokReconcilePreservesPublicPostIDs(t *testing.T) {
+	originalClient := httpClient
+	defer func() { httpClient = originalClient }()
+	const publishID = "v_pub_file~123456789"
+	for _, fixture := range []struct{ name, data, want string }{
+		{"documented numeric", `"publicaly_available_post_id":[7529123456789012345]`, "7529123456789012345"}, //nolint:misspell
+		{"alternate numeric", `"publicly_available_post_id":[7529123456789012345]`, "7529123456789012345"},
+		{"documented string", `"publicaly_available_post_id":["7529123456789012345"]`, "7529123456789012345"}, //nolint:misspell
+		{"alternate string", `"publicly_available_post_id":["7529123456789012345"]`, "7529123456789012345"},
+		{"no public ID", `"publicaly_available_post_id":[]`, ""}, //nolint:misspell
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.URL.String() != tiktokPublishStatusURL {
+					t.Fatalf("reconciliation must only check status: %s", req.URL)
+				}
+				var payload map[string]string
+				if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+					t.Fatal(err)
+				}
+				if payload["publish_id"] != publishID {
+					t.Fatalf("wrong receipt: %#v", payload)
+				}
+				return jsonResponse(req, `{"data":{"status":"PUBLISH_COMPLETE",`+fixture.data+`},"error":{"code":"ok"}}`), nil
+			})}
+			result, err := NewTikTokAdapter("", "", "").ReconcilePublish(t.Context(), "access", "account", publishID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.ExternalID != fixture.want || result.ProviderReference != publishID || (fixture.want != "" && result.SubmissionState != PublishSubmissionAccepted) || (fixture.want == "" && result.SubmissionState != PublishSubmissionPending) {
+				t.Fatalf("wrong reconciled result: %#v", result)
+			}
+		})
+	}
+}
+
+func TestTikTokCoverTimestampPresence(t *testing.T) {
+	originalClient := httpClient
+	defer func() { httpClient = originalClient }()
+	for _, fixture := range []struct {
+		name                    string
+		value                   any
+		present, invalid, unset bool
+	}{
+		{name: "absent"}, {name: "untouched composer field", value: "", present: true, unset: true}, {name: "cleared field", value: nil, present: true, unset: true}, {name: "first frame", value: 0, present: true}, {name: "later frame", value: 1200, present: true}, {name: "negative", value: -1, present: true, invalid: true},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			calls := 0
+			httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				if fixture.invalid {
+					t.Fatalf("invalid timestamp reached provider: %s", req.URL)
+				}
+				switch req.URL.String() {
+				case tiktokCreatorInfoURL:
+					return jsonResponse(req, `{"data":{"privacy_level_options":["SELF_ONLY"]},"error":{"code":"ok"}}`), nil
+				case tiktokVideoInitURL:
+					var payload struct {
+						PostInfo map[string]any `json:"post_info"`
+					}
+					if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+						t.Fatal(err)
+					}
+					value, present := payload.PostInfo["video_cover_timestamp_ms"]
+					if present != (fixture.present && !fixture.unset) || (present && value != float64(fixture.value.(int))) {
+						t.Fatalf("wrong timestamp: %#v", payload.PostInfo)
+					}
+					return jsonResponse(req, `{"data":{"publish_id":"receipt"},"error":{"code":"ok"}}`), nil
+				case tiktokPublishStatusURL:
+					return jsonResponse(req, `{"data":{"status":"PUBLISH_COMPLETE"},"error":{"code":"ok"}}`), nil
+				default:
+					t.Fatalf("unexpected request: %s", req.URL)
+					return nil, nil
+				}
+			})}
+			req := &PublishRequest{Content: "Video", PlatformMediaIDs: []string{"https://media.example/video.mp4"}, Media: []MediaItem{{MimeType: "video/mp4"}}, Settings: map[string]interface{}{"content_posting_method": "DIRECT_POST", "privacy_level": "SELF_ONLY"}}
+			if fixture.present {
+				req.Settings["cover_timestamp_ms"] = fixture.value
+			}
+			req.SetWriteFence(func(PublishResult) error { return nil }, func(PublishResult) error { return nil })
+			result, err := NewTikTokAdapter("", "", "").Publish(t.Context(), "access", "account", req)
+			if fixture.invalid {
+				if err == nil || !strings.Contains(err.Error(), "cover") || calls != 0 {
+					t.Fatalf("expected preflight cover rejection, got %v (%d calls)", err, calls)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls != 3 || result.ExternalID != "receipt" || result.SubmissionState != PublishSubmissionAccepted {
+				t.Fatalf("missing native publication: calls=%d result=%#v", calls, result)
+			}
+		})
+	}
+}
+
+func TestTikTokInboxWaitsForPublicPublication(t *testing.T) {
+	original := httpClient
+	defer func() { httpClient = original }()
+	complete := false
+	httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if complete {
+			return jsonResponse(r, `{"data":{"status":"PUBLISH_COMPLETE","publicly_available_post_id":["741234"]},"error":{"code":"ok"}}`), nil
+		}
+		return jsonResponse(r, `{"data":{"status":"SEND_TO_USER_INBOX"},"error":{"code":"ok"}}`), nil
+	})}
+	adapter := NewTikTokAdapter("", "", "")
+	result, err := adapter.ReconcilePublishRequest(t.Context(), "token", "account", &PublishRequest{Settings: map[string]interface{}{"content_posting_method": "MEDIA_UPLOAD"}}, "publish-1")
+	require.NoError(t, err)
+	require.Equal(t, PublishSubmissionPending, result.SubmissionState)
+	require.Equal(t, "inbox_delivered", result.ProviderState)
+	require.Empty(t, result.ExternalID)
+	require.Equal(t, "publish-1", result.ProviderReference)
+	complete = true
+	result, err = adapter.ReconcilePublish(t.Context(), "token", "account", result.ProviderReference)
+	require.NoError(t, err)
+	require.Equal(t, PublishSubmissionAccepted, result.SubmissionState)
+	require.Equal(t, "741234", result.ExternalID)
+}
+
+func TestTikTokRefreshReturnsStructuredProviderFailure(t *testing.T) {
+	original := httpClient
+	defer func() { httpClient = original }()
+	for _, test := range []struct {
+		code   string
+		status int
+	}{{"server_error", 503}, {"temporarily_unavailable", 503}, {"invalid_grant", 401}, {"rate_limit_exceeded", 429}} {
+		t.Run(test.code, func(t *testing.T) {
+			httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return jsonResponse(r, `{"error":"`+test.code+`","error_description":"private provider response"}`), nil
+			})}
+			_, err := NewTikTokAdapter("", "", "").RefreshToken(t.Context(), RefreshTokenInput{RefreshToken: "refresh"})
+			var providerErr *HTTPError
+			require.ErrorAs(t, err, &providerErr)
+			require.Equal(t, test.status, providerErr.StatusCode)
+			require.Equal(t, test.code, providerErr.Code)
+			require.NotContains(t, err.Error(), "private provider response")
+		})
+	}
+}
+
+func TestTikTokPublicPhotoWaitsForProviderPostIdentity(t *testing.T) {
+	original := httpClient
+	defer func() { httpClient = original }()
+	httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		require.Equal(t, tiktokPublishStatusURL, r.URL.String())
+		return jsonResponse(r, `{"data":{"status":"PUBLISH_COMPLETE"},"error":{"code":"ok"}}`), nil
+	})}
+	req := &PublishRequest{OutputProfile: "tiktok.photo", Media: []MediaItem{{MimeType: "image/jpeg"}}, Settings: map[string]any{"privacy_level": "PUBLIC_TO_EVERYONE"}}
+	result, err := NewTikTokAdapter("", "", "").ReconcilePublishRequest(t.Context(), "token", "account", req, "publish-1")
+	require.NoError(t, err)
+	require.Equal(t, PublishSubmissionPending, result.SubmissionState)
+	require.Empty(t, result.ExternalID)
+	require.Equal(t, "publish-1", result.ProviderReference)
+}

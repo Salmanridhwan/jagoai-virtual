@@ -1,0 +1,33 @@
+appId: com.openpost.app
+---
+# Run with accessibility-large text and the isolated screenshot entry.
+- openLink: openpost:///inbox/comment/comment-provider-failure-large-${CASE_ID}
+- runFlow: open-link-guard.yaml
+- runFlow:
+    when:
+      visible: "Open in.*OpenPost.*"
+    commands:
+      - tapOn: Open
+- runFlow: settings-guard.yaml
+- extendedWaitUntil:
+    visible: Original post
+    timeout: 20000
+- tapOn: ".*Public reply.*Write a public reply.*"
+- inputText: A retained reply for the large-text check.
+- tapOn: Reply publicly
+- extendedWaitUntil:
+    visible: Public reply failed.*
+    timeout: 20000
+# Regression: the unbounded failure panel removed the entire thread viewport.
+- assertVisible: Original post
+- assertVisible: Reply publicly
+- takeScreenshot: reply-failed-large-context-${SCHEME}
+- swipe:
+    start: 50%, 85%
+    end: 50%, 50%
+    duration: 500
+- assertVisible: Start a new reply
+- takeScreenshot: reply-failed-large-recovery-${SCHEME}
+- tapOn: Start a new reply
+- assertVisible: A retained reply for the large-text check.
+- assertVisible: Original post

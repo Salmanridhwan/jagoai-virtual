@@ -1,0 +1,17 @@
+package handlers
+
+import "github.com/openpost/backend/internal/screenshottemplates"
+
+const screenshotTemplateRenderer = screenshottemplates.Renderer
+
+type ScreenshotTemplatePerson = screenshottemplates.ScreenshotTemplatePerson
+type ScreenshotTemplateMessage = screenshottemplates.ScreenshotTemplateMessage
+type ScreenshotTemplateConversation = screenshottemplates.ScreenshotTemplateConversation
+type ScreenshotTemplateReceiptItem = screenshottemplates.ScreenshotTemplateReceiptItem
+type ScreenshotTemplateReceipt = screenshottemplates.ScreenshotTemplateReceipt
+type ScreenshotTemplateStatusUpdate = screenshottemplates.ScreenshotTemplateStatusUpdate
+type ScreenshotTemplateStatus = screenshottemplates.ScreenshotTemplateStatus
+type ScreenshotTemplateMeme = screenshottemplates.ScreenshotTemplateMeme
+type ScreenshotTemplateDocument = screenshottemplates.ScreenshotTemplateDocument
+
+var validateScreenshotTemplateDocument = screenshottemplates.Validate

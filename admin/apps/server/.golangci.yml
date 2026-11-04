@@ -1,0 +1,122 @@
+version: "2"
+run:
+  tests: true
+linters:
+  enable:
+    - asciicheck
+    - bodyclose
+    - dogsled
+    - dupl
+    - errcheck
+    - gochecknoinits
+    - goconst
+    - gocritic
+    - gocyclo
+    - godot
+    - govet
+    - ineffassign
+    - misspell
+    - nakedret
+    - noctx
+    - prealloc
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+    - unconvert
+    - unparam
+    - whitespace
+  settings:
+    dupl:
+      threshold: 100
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+    gocyclo:
+      min-complexity: 15
+    gocognit:
+      # TARGET POSTURE, NOT YET ENFORCED. Cognitive complexity complements
+      # gocyclo: branch count and nesting depth are different axes, and
+      # several //nolint:gocyclo sites stay together deliberately. Measured
+      # 2026-09-18: 162 offenders at 20 (worst: MediaHandler.RegisterRoutes
+      # at 343, main at 200), so enforcing now would mass-fail the gate.
+      # Work the tail down via triage tasks, then move gocognit into
+      # linters.enable above. Do not lower gocyclo:15 instead.
+      min-complexity: 20
+    govet:
+      enable:
+        - atomic
+      disable:
+        - shadow
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - goconst
+        path: .*
+      - linters:
+          - dupl
+          - errcheck
+          - goconst
+          - gocyclo
+          - gocognit
+        path: _test\.go
+      - linters:
+          - dupl
+        path: internal/api/handlers/.*\.go
+      # Retain the attributed upstream ICO/BMP parser algorithms. Complexity
+      # exclusions apply only to these three functions; all other checks remain.
+      - linters:
+          - gocyclo
+        path: internal/mediacodec/ico/internal/bmp/reader\.go
+        source: '^func \(d \*decoder\) (DecodeConfig|decodeRLE)\('
+      - linters:
+          - gocyclo
+        path: internal/mediacodec/ico/internal/icondir/decoder\.go
+        source: '^func decodePNGHeader\('
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

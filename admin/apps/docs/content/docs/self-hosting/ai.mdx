@@ -1,0 +1,54 @@
+---
+title: AI providers
+description: Configure OpenRouter for text and captions, and fal for image generation and editing.
+icon: Sparkles
+---
+
+Add an OpenRouter key to enable AI post generation and automatic image captions. Writing, scheduling, and publishing work without it.
+
+## Add a key
+
+1. Create an API key in [OpenRouter](https://openrouter.ai/settings/keys). Check the account's billing and model access before inviting others to use generation.
+2. Add the key to the `.env` file used by your OpenPost container. Choose model IDs available to that key:
+
+```dotenv
+OPENROUTER_API_KEY=your-openrouter-key
+OPENPOST_TEXT_GENERATION_MODEL=openai/gpt-6-luna
+OPENPOST_WORKFLOW_DECISION_MODEL=typesafe/jev-1.13
+OPENPOST_IMAGE_CAPTION_MODEL=openai/gpt-6-luna
+```
+
+Run `docker compose up -d --force-recreate openpost` to recreate the container with the new environment.
+
+The text model builds post copy from an idea. The image caption model writes suggested alt text. The shown IDs match this release's defaults; confirm that [OpenRouter still offers](https://openrouter.ai/models) them before relying on the example.
+
+You can leave the model values unset to use OpenPost's defaults. `OPENPOST_CONTENT_AI_PROVIDER` optionally selects an exact OpenRouter provider for text and meme generation. `OPENPOST_CONTENT_AI_REQUIRE_ZDR=true` restricts those requests to zero-retention endpoints. Use it only after checking that the selected model and provider support that policy. OpenRouter [documents its per-request zero-retention behavior](https://openrouter.ai/docs/guides/features/zdr). Image captions have separate `OPENPOST_IMAGE_CAPTION_PROVIDER` and `OPENPOST_IMAGE_CAPTION_REQUIRE_ZDR` settings when you need different routing.
+
+Keep the key in your server secret store. Use `OPENROUTER_API_KEY_FILE` for a mounted secret file. Do not include it in posts, prompts, or logs.
+
+## Check the setup
+
+1. Open a new post and ask the AI builder to turn a short idea into a draft. Review the generated copy before saving or publishing.
+2. Add an image with no existing alt text to the composer and generate a caption. Review it before publishing. Existing alt text is kept.
+
+Post generation sends the idea and selected context to the configured model through OpenRouter. Automatic alt text sends a 400 px JPEG thumbnail and up to 1,000 characters of relevant post text, rather than the original image. Background removal, video editing, and local transcription run in the browser and do not require this key.
+
+If a request fails, check the container logs for an OpenRouter error, then check the key, model ID, balance, provider slug, and zero-retention setting. A text-only model may not be suitable for image captions.
+
+Workflow AI decisions use Jev through OpenRouter's Decisions API. They route through TypeSafe and retain the content AI zero-data-retention requirement. Existing saved model settings take precedence over these defaults.
+
+## Image generation with fal
+
+Add a server-side [fal API key](https://fal.ai/dashboard/keys) with access to model inference and billing events:
+
+```dotenv
+FAL_KEY=your-fal-key
+```
+
+You can also set the **fal API key** in instance Settings, or use `FAL_KEY_FILE` for a mounted secret. Restart the server and worker after changing the key. Keep it out of browser code.
+
+The Image Editor uses [GPT Image 2.5 Flare](https://fal.ai/models/openai/gpt-image-2.5/flare/text-to-image/api) by default. Users can select Sunburst in the panel. The [edit endpoint](https://fal.ai/models/openai/gpt-image-2.5/flare/edit/api) handles selected image edits and masked fills. These requests use fal independently of the OpenRouter key and routing settings above.
+
+Sign in, open an editable project saved to OpenPost and choose **AI images**. Follow [Generate and edit images with AI](/image-editor/ai-images) to submit and review a result. This check makes a paid provider request.
+
+The web and worker roles need the same key. Requests and provider receipts are saved in the database, so restarting a worker does not regenerate an accepted image. OpenPost records the request's cost in the existing AI usage ledger using [fal billing events](https://fal.ai/docs/platform-apis/v1/models/billing-events). Missing billing access leaves costs pending and eventually unavailable; it never records a missing charge as zero. No image-specific spending limits are enforced by OpenPost.

@@ -1,0 +1,1403 @@
+<script lang="ts">
+	import { appBranding } from '$lib/app-branding.svelte';
+	import { publicationMasonry } from '$lib/publication-masonry';
+	import { publicationPreviewMedia } from '$lib/publication-preview';
+	import { getAuthenticatedMediaURL } from '$lib/media-url';
+	import MediaPreviewImage from '$lib/components/media-preview-image.svelte';
+	import { Checkbox } from '$lib/components/ui/checkbox';
+	import { Label } from '$lib/components/ui/label';
+	import BatchScheduleDialog from '$lib/components/batch-schedule-dialog.svelte';
+	import PublicationDraftGallery from '$lib/components/publication-draft-gallery.svelte';
+	import PublicationViewSwitch from '$lib/components/publication-view-switch.svelte';
+	import CopyButton from '$lib/components/copy-button.svelte';
+	import Disclosure from '$lib/components/disclosure.svelte';
+	import ListSearch from '$lib/components/list-search.svelte';
+	import { goto } from '$app/navigation';
+	import { ThemeIcon, ProtectedIcon } from '$lib/themes/icons';
+	import type { ThemeIconRole } from '$lib/themes';
+	import type { ProtectedIconRole } from '$lib/themes/icons';
+	import { page } from '$app/state';
+	import { onDestroy, untrack } from 'svelte';
+	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+	import { client, type SocialAccount } from '$lib/api/client';
+	import type { components } from '$lib/api/types';
+	import { workspaceCtx } from '$lib/stores/workspace.svelte';
+	import { auth, type AuthIdentityToken } from '$lib/stores/auth';
+	import { ui } from '$lib/stores/ui.svelte';
+	import { publicationActivityOccurrence } from '$lib/publication-calendar';
+	import { publicationView, isPublicationListTab } from '$lib/stores/publication-view.svelte';
+	import { Button } from '$lib/components/ui/button';
+	import { Tabs, TabsList, TabsTrigger, TabsContent } from '$lib/components/ui/tabs';
+	import * as Tooltip from '$lib/components/ui/tooltip';
+	import PageContainer from '$lib/components/page-container.svelte';
+	import EmptyState from '$lib/components/empty-state.svelte';
+	import InlineNotice from '$lib/components/inline-notice.svelte';
+	import PublicationDeliveryCard from '$lib/components/publication-delivery-card.svelte';
+	import SocialAccountIdentity from '$lib/components/social-account-identity.svelte';
+	import SocialAccountAvatar from '$lib/components/social-account-avatar.svelte';
+	import { deliveryRecoveryAction, deliveryStateLabel } from '$lib/delivery-presentation';
+	import { m } from '$lib/paraglide/messages';
+	import { getLocaleTag } from '$lib/i18n';
+	import { resolveAppPath } from '$lib/app-path';
+	import { dismissToast, showToast } from '$lib/toast';
+	import { formatSocialAccountName } from '$lib/utils';
+	import { createInfiniteQuery, createQuery, type InfiniteData } from '@tanstack/svelte-query';
+	import {
+		activityPublicationsInfiniteQueryOptions,
+		failedJobsInfiniteQueryOptions,
+		openPostQueryKeys,
+		workspaceAccountsQueryOptions,
+		type ActivityPublicationBucket
+	} from '@openpost/query-catalog';
+	import type { QueryPageResult } from '@openpost/query-catalog';
+	import { queryAPI } from '$lib/query/api';
+	import { queryClient } from '$lib/query/client';
+	import { QueryProjectionTracker } from '$lib/query/projection';
+	import {
+		PublicationOperationScope,
+		type PublicationOperation
+	} from './publication-operation-scope';
+
+	type Publication = components['schemas']['PublicationResponse'];
+	type ActivityDestination = NonNullable<Publication['renditions']>[number];
+	type ActivityTab = 'scheduled' | 'published' | 'failed' | 'drafts';
+	type ActivityPageState = { total: number; nextCursor: string };
+	type ActivityItem = {
+		publication: Publication;
+		id: string;
+		publication_id: string;
+		href: string;
+		content: string;
+		status: string;
+		scheduled_at?: string;
+		actual_run_at?: string;
+		created_at: string;
+		isThread: boolean;
+		postCount: number;
+		destinations: ActivityDestination[];
+	};
+
+	type JobLog = {
+		id: string;
+		type: string;
+		status: string;
+		publication_id?: string;
+		payload?: string;
+		run_at: string;
+		last_error?: string;
+	};
+
+	let selecting = $state(false);
+	let selectedIds = $state<string[]>([]);
+	$effect(() => {
+		void [currentWorkspaceID, activeTab];
+		untrack(() => {
+			selectedIds = [];
+			selecting = false;
+		});
+	});
+	let accounts = $state.raw<SocialAccount[]>([]);
+	let retryingDestination = $state('');
+	let successMessage = $state('');
+	let hasLoaded = $state(false);
+	let error = $state('');
+	let queryError = $state('');
+	let searchQuery = $state('');
+	let dataWorkspaceID = $state('');
+	let dataActivityBucket = $state<ActivityPublicationBucket | ''>('');
+	let dataSearch = $state('');
+	let dataRequestSequence = 0;
+	let destinationActionSequence = 0;
+	const failureDismissalToastIDs = new Set<string | number>();
+	const missingRowMedia = new SvelteSet<string>();
+	const inventoryView = $derived(page.url.searchParams.get('view') === 'grid' ? 'grid' : 'list');
+	const requestedTab = page.url.searchParams.get('tab');
+	let activeTab = $state<ActivityTab>(
+		isPublicationListTab(requestedTab) ? requestedTab : publicationView.listTab
+	);
+	$effect(() => {
+		if (page.route.id !== '/publications') return;
+		const tab = page.url.searchParams.get('tab');
+		const selectedTab = isPublicationListTab(tab) ? tab : untrack(() => publicationView.listTab);
+		activeTab = selectedTab;
+		publicationView.rememberListTab(selectedTab);
+	});
+	function selectActivityTab(value: string) {
+		if (!isPublicationListTab(value)) return;
+		activeTab = value;
+		publicationView.rememberListTab(value);
+		if (page.route.id !== '/publications') return;
+		const url = new URL(page.url);
+		if (value === 'scheduled') url.searchParams.delete('tab');
+		else url.searchParams.set('tab', value);
+		void goto(url, { replaceState: true, noScroll: true, keepFocus: true });
+	}
+	const publicationPageSize = 40;
+	const jobPageSize = 50;
+	const operationScope = new PublicationOperationScope<AuthIdentityToken | undefined>();
+	type ActivityOperation = PublicationOperation<AuthIdentityToken | undefined>;
+
+	const currentWorkspaceID = $derived(workspaceCtx.currentWorkspace?.id ?? '');
+	const activeActivityBucket = $derived(activityBucketForTab(activeTab));
+	const searchTerm = $derived(searchQuery.trim());
+	const publicationsInfinite = createInfiniteQuery(() =>
+		activityPublicationsInfiniteQueryOptions(queryAPI, currentWorkspaceID, activeActivityBucket, {
+			limit: publicationPageSize,
+			search: searchTerm
+		})
+	);
+	const failedJobsInfinite = createInfiniteQuery(() => ({
+		...failedJobsInfiniteQueryOptions(queryAPI, currentWorkspaceID, { limit: jobPageSize }),
+		enabled: Boolean(currentWorkspaceID && activeActivityBucket === 'failed')
+	}));
+	// Pages stay in the Query cache under the workspace+bucket+search key, so revisits
+	// and tab switches reuse fetched pages instead of refetching page one.
+	const posts = $derived.by(() => {
+		const seen = new Set<string>();
+		const items: ActivityItem[] = [];
+		for (const page of publicationsInfinite.data?.pages ?? []) {
+			for (const publication of page.items) {
+				if (seen.has(publication.id)) continue;
+				seen.add(publication.id);
+				items.push(activityItem(publication));
+			}
+		}
+		return items;
+	});
+	const scheduledPosts = $derived(
+		posts
+			.filter((post) => activityBucket(post) === 'scheduled')
+			.toSorted((a, b) => timestamp(a.scheduled_at) - timestamp(b.scheduled_at))
+	);
+	const publishedPosts = $derived(
+		posts
+			.filter((post) => activityBucket(post) === 'published')
+			.toSorted(
+				(a, b) =>
+					timestamp(b.actual_run_at || b.scheduled_at || b.created_at) -
+					timestamp(a.actual_run_at || a.scheduled_at || a.created_at)
+			)
+	);
+	const failedPosts = $derived(
+		posts
+			.filter((post) => activityBucket(post) === 'failed')
+			.toSorted((a, b) => timestamp(b.created_at) - timestamp(a.created_at))
+	);
+	const failureGroups = $derived.by(() => {
+		const groups = new SvelteMap<
+			string,
+			{
+				key: string;
+				label: string;
+				postIDs: SvelteSet<string>;
+				samplePost: ActivityItem;
+				sampleDestination: ActivityDestination;
+			}
+		>();
+		for (const post of failedPosts) {
+			for (const destination of post.destinations.filter((item) =>
+				['retry', 'manual_resolution'].includes(deliveryRecoveryAction(item.delivery, item.status))
+			)) {
+				const recovery = deliveryRecoveryAction(destination.delivery, destination.status);
+				const key = `${destination.social_account_id}:${recovery}:${destination.delivery?.error_code || destination.delivery?.error_kind || 'failed'}`;
+				const group = groups.get(key) ?? {
+					key,
+					label: destinationName(destination),
+					postIDs: new SvelteSet<string>(),
+					samplePost: post,
+					sampleDestination: destination
+				};
+				group.postIDs.add(post.id);
+				groups.set(key, group);
+			}
+		}
+		const priority = new Map([
+			['manual_resolution', 0],
+			['retry', 1]
+		]);
+		return [...groups.values()].toSorted(
+			(left, right) =>
+				(priority.get(
+					deliveryRecoveryAction(left.sampleDestination.delivery, left.sampleDestination.status)
+				) ?? 2) -
+				(priority.get(
+					deliveryRecoveryAction(right.sampleDestination.delivery, right.sampleDestination.status)
+				) ?? 2)
+		);
+	});
+	const drafts = $derived(
+		posts
+			.filter((post) => activityBucket(post) === 'draft')
+			.toSorted((a, b) => timestamp(b.created_at) - timestamp(a.created_at))
+	);
+	const activePosts = $derived(
+		activeTab === 'scheduled'
+			? scheduledPosts
+			: activeTab === 'published'
+				? publishedPosts
+				: activeTab === 'failed'
+					? failedPosts
+					: drafts
+	);
+	const failedJobs = $derived<JobLog[]>(
+		(failedJobsInfinite.data?.pages ?? []).flatMap((page) => page.items)
+	);
+	const publicationPage = $derived<ActivityPageState>({
+		total: publicationsInfinite.data?.pages[0]?.total ?? 0,
+		nextCursor: publicationsInfinite.data?.pages.at(-1)?.nextCursor ?? ''
+	});
+	const failedJobsPage = $derived<ActivityPageState>({
+		total: failedJobsInfinite.data?.pages[0]?.total ?? 0,
+		nextCursor: failedJobsInfinite.data?.pages.at(-1)?.nextCursor ?? ''
+	});
+	const accountsQuery = createQuery(() =>
+		workspaceAccountsQueryOptions(queryAPI, currentWorkspaceID)
+	);
+	// Derived from isFetching: true during background refetches too. Never pass
+	// this to PageContainer `loading` (use `initialLoading`); it would flash the
+	// skeleton over cached content on every refresh.
+	const loading = $derived(
+		(publicationsInfinite.isFetching && !publicationsInfinite.isFetchingNextPage) ||
+			accountsQuery.isFetching ||
+			(activeActivityBucket === 'failed' &&
+				failedJobsInfinite.isFetching &&
+				!failedJobsInfinite.isFetchingNextPage)
+	);
+	const visibleError = $derived(error || queryError);
+	const initialQueriesSettled = $derived(
+		!publicationsInfinite.isPending &&
+			!accountsQuery.isPending &&
+			(activeActivityBucket !== 'failed' || !failedJobsInfinite.isPending)
+	);
+	const currentViewLoaded = $derived(
+		hasLoaded &&
+			dataWorkspaceID === currentWorkspaceID &&
+			dataActivityBucket === activeActivityBucket &&
+			dataSearch === searchTerm &&
+			initialQueriesSettled
+	);
+	const initialLoading = $derived(
+		!currentViewLoaded && !visibleError && (loading || Boolean(currentWorkspaceID))
+	);
+	// Queries pause instead of erroring when the device is offline. Surface the
+	// waiting state in the page copy so a cold offline load does not look stuck.
+	const offlinePaused = $derived(
+		(publicationsInfinite.fetchStatus === 'paused' || accountsQuery.fetchStatus === 'paused') &&
+			!currentViewLoaded &&
+			!visibleError
+	);
+	const accountsProjection = new QueryProjectionTracker();
+
+	$effect(() => {
+		const workspaceId = currentWorkspaceID;
+		const activityBucket = activeActivityBucket;
+		if (
+			dataWorkspaceID === workspaceId &&
+			dataActivityBucket === activityBucket &&
+			dataSearch === searchTerm
+		)
+			return;
+		untrack(() => {
+			dismissFailureDismissalToasts();
+			operationScope.supersedeView();
+			destinationActionSequence += 1;
+			retryingDestination = '';
+			dataRequestSequence++;
+			const workspaceChanged = dataWorkspaceID !== workspaceId;
+			dataWorkspaceID = workspaceId;
+			dataActivityBucket = activityBucket;
+			dataSearch = searchTerm;
+			hasLoaded = false;
+			error = '';
+			queryError = '';
+			successMessage = '';
+			if (workspaceChanged) {
+				accounts = [];
+			}
+		});
+	});
+
+	$effect(() => {
+		// Infinite pages are keyed by workspace+bucket, so arriving data always
+		// belongs to the current view. Mark loaded once the first page lands.
+		if (publicationsInfinite.data && !hasLoaded) {
+			untrack(() => {
+				hasLoaded = true;
+			});
+		}
+	});
+
+	$effect(() => {
+		const data = accountsQuery.data;
+		if (!accountsProjection.shouldProject(data, currentWorkspaceID)) return;
+		untrack(() => {
+			accounts = data;
+		});
+	});
+
+	$effect(() => {
+		if (publicationsInfinite.isError) {
+			queryError = m.activity_failed_posts();
+			return;
+		}
+		if (!initialQueriesSettled) {
+			queryError = '';
+			return;
+		}
+		if (activeActivityBucket === 'failed' && failedJobsInfinite.isError) {
+			queryError = m.activity_failed_jobs();
+			return;
+		}
+		if (accountsQuery.isError) {
+			if (!accountsQuery.data) accounts = [];
+			queryError = m.activity_failed_accounts();
+			return;
+		}
+		queryError = '';
+	});
+
+	async function loadData() {
+		dataRequestSequence++;
+		error = '';
+		queryError = '';
+		await Promise.all([
+			publicationsInfinite.refetch(),
+			accountsQuery.refetch(),
+			...(activeActivityBucket === 'failed' ? [failedJobsInfinite.refetch()] : [])
+		]);
+	}
+
+	async function loadMorePublicationHistory() {
+		if (
+			!publicationsInfinite.hasNextPage ||
+			publicationsInfinite.isFetchingNextPage ||
+			publicationsInfinite.isPending
+		)
+			return;
+		error = '';
+		try {
+			await publicationsInfinite.fetchNextPage();
+		} catch (cause) {
+			error = cause instanceof Error ? cause.message : m.activity_failed_posts();
+		}
+	}
+
+	async function loadMoreFailedJobs() {
+		if (
+			!failedJobsInfinite.hasNextPage ||
+			failedJobsInfinite.isFetchingNextPage ||
+			failedJobsInfinite.isPending
+		)
+			return;
+		error = '';
+		try {
+			await failedJobsInfinite.fetchNextPage();
+		} catch (cause) {
+			error = cause instanceof Error ? cause.message : m.activity_failed_jobs();
+		}
+	}
+
+	function timestamp(value?: string) {
+		return value ? new Date(value).getTime() : 0;
+	}
+
+	function formatDateTime(value?: string) {
+		if (!value) return '';
+		return new Date(value).toLocaleString(getLocaleTag(), {
+			month: 'short',
+			day: 'numeric',
+			hour: '2-digit',
+			minute: '2-digit',
+			timeZone: workspaceCtx.settings.timezone || 'UTC'
+		});
+	}
+
+	function threadPostCount(count: number) {
+		return count === 1
+			? m.activity_thread_post_one({ count })
+			: m.activity_thread_post_many({ count });
+	}
+
+	function activityItem(publication: Publication): ActivityItem {
+		const segments = publication.segments ?? [];
+		const content =
+			publication.source_text.trim() ||
+			segments.find((segment) => segment.body.trim())?.body.trim() ||
+			publication.title.trim() ||
+			m.activity_untitled_post();
+		const isThread = publication.intent === 'thread' || segments.length > 1;
+		return {
+			publication,
+			id: publication.id,
+			publication_id: publication.id,
+			href: `/publications/${encodeURIComponent(publication.id)}`,
+			content,
+			status: publication.status,
+			scheduled_at: publication.scheduled_at,
+			actual_run_at: publication.actual_run_at,
+			created_at: publication.created_at,
+			isThread,
+			postCount: Math.max(1, segments.length),
+			destinations: publication.renditions ?? []
+		};
+	}
+
+	function postText(post: ActivityItem) {
+		return post.isThread ? `${post.content} · ${threadPostCount(post.postCount)}` : post.content;
+	}
+
+	function truncate(value: string, max = 180) {
+		return value.length > max ? `${value.slice(0, max).trim()}…` : value;
+	}
+
+	function failedJobHref(job: JobLog) {
+		if (job.publication_id) {
+			return `/publications/${encodeURIComponent(job.publication_id)}`;
+		}
+		if (!job.payload) return '';
+		try {
+			const payload = JSON.parse(job.payload);
+			if (payload.publication_id) {
+				return `/publications/${encodeURIComponent(payload.publication_id)}`;
+			}
+			return '';
+		} catch {
+			return '';
+		}
+	}
+
+	function statusLabel(post: ActivityItem) {
+		switch (post.status) {
+			case 'scheduled':
+				return m.activity_status_scheduled();
+			case 'published':
+				return m.activity_status_published();
+			case 'failed':
+				return m.activity_status_failed();
+			case 'publishing':
+				return m.activity_status_publishing();
+			case 'ready':
+				return m.activity_status_pending();
+			default:
+				return m.activity_status_draft();
+		}
+	}
+
+	function activityBucket(post: ActivityItem): ActivityPublicationBucket {
+		switch (post.status) {
+			case 'published':
+				return 'published';
+			case 'failed':
+				return 'failed';
+			case 'scheduled':
+			case 'publishing':
+				return 'scheduled';
+			case 'ready':
+				return post.scheduled_at ? 'scheduled' : 'draft';
+			default:
+				return 'draft';
+		}
+	}
+
+	function activityBucketForTab(tab: ActivityTab): ActivityPublicationBucket {
+		return tab === 'drafts' ? 'draft' : tab;
+	}
+
+	type StatusIcon =
+		| { kind: 'theme'; role: ThemeIconRole }
+		| { kind: 'protected'; role: ProtectedIconRole };
+
+	function statusIcon(post: ActivityItem): StatusIcon {
+		switch (post.status) {
+			case 'scheduled':
+				return { kind: 'theme', role: 'time' };
+			case 'published':
+				return { kind: 'protected', role: 'success' };
+			case 'failed':
+				return { kind: 'protected', role: 'error' };
+			default:
+				return { kind: 'theme', role: 'file' };
+		}
+	}
+
+	function statusClass(post: ActivityItem) {
+		switch (post.status) {
+			case 'scheduled':
+				return 'text-warning-foreground';
+			case 'publishing':
+			case 'ready':
+				return 'text-info-foreground';
+			case 'published':
+				return 'text-success-foreground';
+			case 'failed':
+				return 'text-destructive';
+			default:
+				return 'text-muted-foreground';
+		}
+	}
+
+	function destinationAccount(destination: ActivityDestination) {
+		return accounts.find((account) => account.id === destination.social_account_id);
+	}
+
+	function destinationName(destination: ActivityDestination) {
+		const account = destinationAccount(destination);
+		return (
+			formatSocialAccountName(
+				account?.account_username,
+				account?.platform ?? destination.platform
+			) ||
+			account?.slug ||
+			destination.platform
+		);
+	}
+
+	function destinationState(destination: ActivityDestination) {
+		return destination.delivery?.state || destination.status;
+	}
+
+	function deliverySummaryParts(post: ActivityItem): string[] {
+		const destinations = post.destinations ?? [];
+		const published = destinations.filter((destination) =>
+			['success', 'published', 'live'].includes(destinationState(destination))
+		).length;
+		const failed = destinations.filter((destination) =>
+			['failed', 'rejected', 'manual_resolution'].includes(destinationState(destination))
+		).length;
+		const parts: string[] = [];
+		if (published > 0) parts.push(m.activity_delivery_published_count({ count: published }));
+		if (failed > 0) parts.push(m.activity_delivery_failed_count({ count: failed }));
+		return parts;
+	}
+
+	function statusBadgeLabel(post: ActivityItem): string {
+		const label = statusLabel(post);
+		const tabLabels = {
+			scheduled: m.activity_tab_scheduled(),
+			published: m.activity_tab_published(),
+			failed: m.activity_tab_failed(),
+			drafts: m.activity_tab_drafts()
+		} satisfies Record<ActivityTab, string>;
+		return label === tabLabels[activeTab] ? '' : label;
+	}
+
+	function buildDeliveryReport(post: ActivityItem) {
+		const lines = [
+			m.activity_report_heading(),
+			`${m.activity_report_post()}: ${post.id}`,
+			`${m.activity_report_created()}: ${post.created_at}`
+		];
+		if (post.scheduled_at) lines.push(`${m.activity_report_scheduled()}: ${post.scheduled_at}`);
+		for (const destination of post.destinations ?? []) {
+			lines.push(
+				'',
+				`${m.activity_report_destination()}: ${destinationName(destination)} (${destination.platform})`
+			);
+			lines.push(
+				`${m.activity_report_status()}: ${deliveryStateLabel(destinationState(destination))}`
+			);
+			if (destination.error_message) {
+				lines.push(`${m.activity_report_reason()}: ${destination.error_message}`);
+			}
+		}
+		return lines.join('\n');
+	}
+
+	function destinationActionLabel(destination: ActivityDestination) {
+		switch (deliveryRecoveryAction(destination.delivery, destination.status)) {
+			case 'retry':
+				return m.publication_delivery_retry();
+			case 'manual_resolution':
+				return m.publication_delivery_review_destination();
+			default:
+				return '';
+		}
+	}
+
+	function captureActivityOperation(
+		workspaceId: string,
+		activityBucket: ActivityPublicationBucket
+	): ActivityOperation {
+		return operationScope.capture(auth.captureIdentity(), workspaceId, activityBucket);
+	}
+
+	function activityActorIsCurrent(operation: ActivityOperation) {
+		return operationScope.actorIsCurrent(operation, (identity) => auth.isIdentityCurrent(identity));
+	}
+
+	function activityViewIsCurrent(operation: ActivityOperation) {
+		if (dataSearch !== searchTerm) return false;
+		return operationScope.viewIsCurrent(operation, {
+			workspaceId: currentWorkspaceID,
+			viewKey: dataActivityBucket === activeActivityBucket ? dataActivityBucket : '',
+			isIdentityCurrent: (identity) => auth.isIdentityCurrent(identity)
+		});
+	}
+
+	function removePostFromCache(workspaceId: string, publicationId: string) {
+		for (const bucket of ['scheduled', 'published', 'failed', 'draft'] as const) {
+			const queryKey = openPostQueryKeys.publications.activity(workspaceId, bucket, {
+				limit: publicationPageSize,
+				cursor: ''
+			});
+			queryClient.setQueryData(
+				queryKey,
+				(cached: InfiniteData<QueryPageResult<Publication>> | undefined) => {
+					if (!cached) return cached;
+					return {
+						...cached,
+						pages: cached.pages.map((page, index) => ({
+							...page,
+							items: page.items.filter((item) => item.id !== publicationId),
+							total: index === 0 ? Math.max(0, page.total - 1) : page.total
+						}))
+					};
+				}
+			);
+		}
+		void queryClient.invalidateQueries({
+			queryKey: openPostQueryKeys.publications.activityRoot(workspaceId)
+		});
+	}
+
+	function invalidateActivity(workspaceId: string, activities?: ActivityPublicationBucket[]) {
+		ui.invalidatePublications(
+			{ workspaceId, scopes: ['activity'], activities },
+			{ immediate: true }
+		);
+	}
+
+	function dismissFailureDismissalToasts() {
+		for (const toastID of failureDismissalToastIDs) dismissToast(toastID);
+		failureDismissalToastIDs.clear();
+	}
+
+	async function reconcileActivityPublication(
+		operation: ActivityOperation,
+		publicationId: string,
+		activities?: ActivityPublicationBucket[]
+	) {
+		if (!activityActorIsCurrent(operation)) return false;
+		const queryKey = openPostQueryKeys.publications.detail(operation.workspaceId, publicationId);
+		await queryClient.cancelQueries({ queryKey, exact: true });
+		if (!activityActorIsCurrent(operation)) return false;
+		await queryClient.invalidateQueries({ queryKey, exact: true, refetchType: 'none' });
+		if (!activityActorIsCurrent(operation)) return false;
+		invalidateActivity(operation.workspaceId, activities);
+		return true;
+	}
+
+	async function runDestinationAction(post: ActivityItem, destination: ActivityDestination) {
+		const recovery = deliveryRecoveryAction(destination.delivery, destination.status);
+		if (recovery === 'retry' && post.publication_id) {
+			const workspaceId = currentWorkspaceID;
+			const activityBucket = dataActivityBucket;
+			if (!workspaceId || !activityBucket) return;
+			const operation = captureActivityOperation(workspaceId, activityBucket);
+			const actionSequence = ++destinationActionSequence;
+			const key = `${post.id}:${destination.social_account_id}:${destination.target_key}`;
+			retryingDestination = key;
+			error = '';
+			successMessage = '';
+			try {
+				const { error: retryError } = await client.POST(
+					'/publications/{id}/renditions/{account_id}/retry',
+					{
+						params: {
+							path: {
+								id: post.publication_id,
+								account_id: destination.social_account_id
+							},
+							query: {
+								target_key: destination.target_key
+							}
+						}
+					}
+				);
+				if (retryError) {
+					throw new Error(retryError.detail || m.activity_delivery_failed());
+				}
+				if (
+					!(await reconcileActivityPublication(operation, post.publication_id, [
+						'failed',
+						'scheduled'
+					]))
+				)
+					return;
+				if (actionSequence === destinationActionSequence && activityViewIsCurrent(operation)) {
+					successMessage = m.activity_retry_queued();
+					await loadData();
+				}
+			} catch (cause) {
+				if (actionSequence === destinationActionSequence && activityViewIsCurrent(operation)) {
+					error = cause instanceof Error ? cause.message : m.activity_delivery_failed();
+				}
+			} finally {
+				if (actionSequence === destinationActionSequence && activityViewIsCurrent(operation)) {
+					retryingDestination = '';
+				}
+			}
+			return;
+		}
+		if (recovery === 'manual_resolution') {
+			await goto(
+				resolveAppPath(`/settings?tab=accounts&account_id=${destination.social_account_id}`)
+			);
+			return;
+		}
+	}
+
+	async function dismissFailedPost(post: ActivityItem) {
+		if (!post.publication_id) return;
+		const workspaceId = currentWorkspaceID;
+		const activityBucket = dataActivityBucket;
+		if (!workspaceId || !activityBucket) return;
+		const operation = captureActivityOperation(workspaceId, activityBucket);
+		error = '';
+		const publicationID = post.publication_id;
+		try {
+			const response = await client.POST('/publications/{id}/failure-dismissal', {
+				params: { path: { id: publicationID } }
+			});
+			if (response.error) {
+				if (activityViewIsCurrent(operation)) {
+					error = response.error.detail || m.activity_dismiss_failed_error();
+				}
+				return;
+			}
+			if (!(await reconcileActivityPublication(operation, publicationID, ['failed']))) return;
+			if (!activityViewIsCurrent(operation)) return;
+			removePostFromCache(operation.workspaceId, post.id);
+			const toastID = showToast(m.activity_dismissed_failed(), 'success', {
+				actionLabel: m.activity_restore_failed(),
+				onAction: () => {
+					failureDismissalToastIDs.delete(toastID);
+					if (!activityViewIsCurrent(operation)) return;
+					void (async () => {
+						const restored = await client.DELETE('/publications/{id}/failure-dismissal', {
+							params: { path: { id: publicationID } }
+						});
+						if (restored.error) {
+							if (activityViewIsCurrent(operation)) {
+								error = restored.error.detail || m.activity_dismiss_failed_error();
+							}
+							return;
+						}
+						if (!(await reconcileActivityPublication(operation, publicationID, ['failed']))) return;
+						if (activityViewIsCurrent(operation)) await loadData();
+					})();
+				}
+			});
+			failureDismissalToastIDs.add(toastID);
+		} catch {
+			if (activityViewIsCurrent(operation)) error = m.activity_dismiss_failed_error();
+		}
+	}
+
+	onDestroy(() => {
+		dismissFailureDismissalToasts();
+		dataRequestSequence += 1;
+		destinationActionSequence += 1;
+		operationScope.destroy();
+	});
+</script>
+
+{#snippet deliveryDetails(post: ActivityItem, accountDestinations: ActivityDestination[])}
+	{@const summaryParts = deliverySummaryParts(post)}
+	{#if post.destinations?.length && (post.status === 'failed' || summaryParts.length > 0 || post.destinations.some((destination) => destination.status === 'failed') || post.destinations.length > accountDestinations.length)}
+		<Disclosure
+			summary={m.activity_delivery_details()}
+			open={post.status === 'failed'}
+			class="mt-1 max-w-2xl rounded-lg"
+			summaryClass="text-xs font-normal text-muted-foreground hover:text-foreground"
+		>
+			{#snippet summaryEnd()}
+				{#if summaryParts.length}
+					<span class="font-normal text-muted-foreground">{summaryParts.join(' · ')}</span>
+				{/if}
+			{/snippet}
+			<div
+				class={[
+					'border-t px-3',
+					post.status === 'failed'
+						? 'border-destructive/15 bg-destructive/[0.035]'
+						: 'border-border bg-card/50'
+				]}
+			>
+				{#if post.status === 'failed'}
+					<div
+						class="flex flex-wrap items-center justify-between gap-2 border-b border-destructive/10 px-3 py-2"
+					>
+						<div class="ml-auto flex items-center gap-1">
+							<CopyButton
+								variant="ghost"
+								size="sm"
+								class="h-8 text-xs"
+								value={buildDeliveryReport(post)}
+								scopeKey={`${workspaceCtx.currentWorkspace?.id}:${post.id}`}
+								label={m.activity_copy_report()}
+								successLabel={m.activity_report_copied()}
+								errorMessage={m.activity_report_copy_failed()}
+								fallbackLabel={m.activity_copy_report()}
+							/>
+							<Button
+								variant="ghost"
+								size="sm"
+								class="h-8 text-xs"
+								onclick={() => dismissFailedPost(post)}
+							>
+								{m.activity_dismiss_failed()}
+							</Button>
+						</div>
+					</div>
+				{/if}
+				<div class="divide-y divide-border/70 px-3">
+					{#each post.destinations as destination (destination.id)}
+						<PublicationDeliveryCard
+							rendition={destination}
+							destinationLabel={destinationName(destination)}
+							variant="compact"
+							retrying={retryingDestination ===
+								`${post.id}:${destination.social_account_id}:${destination.target_key}`}
+							onRetry={() => runDestinationAction(post, destination)}
+							onManualResolution={() => runDestinationAction(post, destination)}
+						/>
+					{/each}
+				</div>
+			</div>
+		</Disclosure>
+	{/if}
+{/snippet}
+
+{#snippet destinationMarks(post: ActivityItem, accountDestinations: ActivityDestination[])}
+	{#if post.destinations?.length}
+		<span class="hidden shrink-0 items-center gap-1 sm:flex">
+			<span class="sr-only">{m.calendar_account_count({ count: accountDestinations.length })}</span>
+			<span class="flex items-center -space-x-1.5" aria-hidden="true">
+				{#each accountDestinations.slice(0, 4) as destination (destination.social_account_id)}
+					{@const account = destinationAccount(destination)}
+					<span class="rounded-full ring-2 ring-background" title={destinationName(destination)}>
+						<SocialAccountAvatar
+							name={destinationName(destination)}
+							platform={destination.platform}
+							avatarUrl={account?.account_avatar_url}
+							size="sm"
+						/>
+					</span>
+				{/each}
+				{#if accountDestinations.length > 4}
+					<span
+						class="flex size-6 items-center justify-center rounded-full border border-border bg-muted text-xs font-medium text-muted-foreground ring-2 ring-background"
+					>
+						+{accountDestinations.length - 4}
+					</span>
+				{/if}
+			</span>
+		</span>
+	{/if}
+{/snippet}
+
+{#snippet postList(items: ActivityItem[], emptyTitle: string, emptyDescription: string)}
+	{#if items.length === 0}
+		<EmptyState
+			themeIconRole="file"
+			title={searchTerm ? m.posts_search_results({ count: 0, query: searchTerm }) : emptyTitle}
+			description={searchTerm ? undefined : emptyDescription}
+			actionLabel={searchTerm ? m.posts_clear_search() : m.activity_new_post()}
+			onAction={searchTerm ? () => (searchQuery = '') : () => ui.startNewPost()}
+			variant="muted"
+		/>
+	{:else if activeTab === 'drafts' && inventoryView === 'grid'}
+		<PublicationDraftGallery
+			publications={items.map((post) => post.publication)}
+			{accounts}
+			{selecting}
+			bind:selectedIds
+		/>
+	{:else if items.length > 0}
+		<div
+			class={inventoryView === 'grid'
+				? 'publication-masonry'
+				: 'divide-y overflow-hidden rounded-xl border bg-card text-card-foreground'}
+			use:publicationMasonry={inventoryView === 'grid'}
+			data-testid={inventoryView === 'grid' ? 'publication-grid' : 'publication-list'}
+		>
+			{#each items as post (post.id)}
+				{@const statusIconValue = statusIcon(post)}
+				{@const accountDestinations = [
+					...new Map(
+						post.destinations.map((destination) => [destination.social_account_id, destination])
+					).values()
+				]}
+				<article
+					class={[
+						'group min-w-0 hover:bg-muted/30',
+						inventoryView === 'grid'
+							? 'overflow-hidden rounded-xl border bg-card p-3 text-card-foreground sm:p-4'
+							: 'px-3 py-1.5 sm:px-4'
+					]}
+				>
+					{#if inventoryView === 'grid'}
+						<div class="flex items-start gap-3 sm:gap-4">
+							{#if activeTab === 'drafts' && selecting}
+								<Label
+									for={`post-select-${post.id}`}
+									class="flex min-h-11 min-w-11 shrink-0 items-center justify-center"
+									><Checkbox
+										id={`post-select-${post.id}`}
+										aria-label={m.batch_select_post()}
+										checked={selectedIds.includes(post.id)}
+										disabled={!selectedIds.includes(post.id) && selectedIds.length >= 20}
+										onCheckedChange={(checked) => {
+											selectedIds =
+												checked === true
+													? [...selectedIds, post.id]
+													: selectedIds.filter((id) => id !== post.id);
+										}}
+									/></Label
+								>
+							{:else if activeTab !== 'drafts'}
+								<div
+									class="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg border bg-muted/50"
+								>
+									{#if statusIconValue.kind === 'protected'}
+										<ProtectedIcon
+											icon={statusIconValue.role}
+											class={`size-4 ${statusClass(post)}`}
+										/>
+									{:else}
+										<ThemeIcon role={statusIconValue.role} class={`size-4 ${statusClass(post)}`} />
+									{/if}
+								</div>
+							{/if}
+							<div class="min-w-0 flex-1">
+								<div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+									{#if activeTab !== 'drafts'}<span class={['font-medium', statusClass(post)]}
+											>{statusLabel(post)}</span
+										>{/if}
+									<span class="text-muted-foreground">
+										{formatDateTime(publicationActivityOccurrence(post))}
+									</span>
+									{#if post.publication.review_state === 'pending'}<span>{m.review_pending()}</span>
+									{:else if post.publication.review_state === 'needs_review'}<span
+											>{m.review_needs_review()}</span
+										>
+									{:else if post.publication.review_state === 'changes_requested'}<span
+											class="text-destructive">{m.review_changes_requested()}</span
+										>
+									{:else if post.publication.review_state === 'approved'}<span
+											>{m.review_approved()}</span
+										>{/if}
+									{#if post.isThread}
+										<span class="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+											{threadPostCount(post.postCount)}
+										</span>
+									{/if}
+								</div>
+								<a
+									href={resolveAppPath(post.href)}
+									dir="auto"
+									class="mt-1.5 block max-w-[72ch] rounded-sm text-sm leading-6 text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+								>
+									{truncate(postText(post))}
+								</a>
+								{#if post.destinations?.length}
+									<div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+										{#each accountDestinations.slice(0, 4) as destination (destination.social_account_id)}
+											{@const account = destinationAccount(destination)}
+											<span
+												class="inline-flex max-w-52 items-center gap-1.5 rounded-md border bg-background px-2 py-1"
+											>
+												<SocialAccountIdentity
+													name={destinationName(destination)}
+													platform={destination.platform}
+													avatarUrl={account?.account_avatar_url}
+													size="sm"
+													showPlatform={false}
+													class="gap-1.5 text-xs"
+												/>
+											</span>
+										{/each}
+										{#if accountDestinations.length > 4}
+											<span class="rounded-full bg-muted px-2 py-1"
+												>+{accountDestinations.length - 4}</span
+											>
+										{/if}
+									</div>
+								{/if}
+								{@render deliveryDetails(post, accountDestinations)}
+							</div>
+							{#if activeTab !== 'drafts'}
+								<Button
+									variant="ghost"
+									size="sm"
+									class="min-h-10 shrink-0"
+									onclick={() => goto(resolveAppPath(post.href))}
+									aria-label={post.status === 'published' || post.status === 'publishing'
+										? m.activity_view_post({ title: truncate(postText(post), 40) })
+										: m.activity_edit_post({ title: truncate(postText(post), 40) })}
+								>
+									{#if post.status === 'published' || post.status === 'publishing'}
+										<ThemeIcon role="eye" class="size-4 sm:mr-1.5" />
+										<span class="hidden sm:inline">{m.activity_view_details()}</span>
+									{:else}
+										<ThemeIcon role="edit" class="size-4 sm:mr-1.5" />
+										<span class="hidden sm:inline">{m.common_edit()}</span>
+									{/if}
+								</Button>
+							{/if}
+						</div>
+					{:else}
+						{@const rowMedia = publicationPreviewMedia(post.publication)}
+						<div class="flex min-h-11 items-center gap-3">
+							{#if activeTab === 'drafts' && selecting}
+								<Label
+									for={`post-select-${post.id}`}
+									class="flex min-h-11 min-w-11 shrink-0 items-center justify-center"
+									><Checkbox
+										id={`post-select-${post.id}`}
+										aria-label={m.batch_select_post()}
+										checked={selectedIds.includes(post.id)}
+										disabled={!selectedIds.includes(post.id) && selectedIds.length >= 20}
+										onCheckedChange={(checked) => {
+											selectedIds =
+												checked === true
+													? [...selectedIds, post.id]
+													: selectedIds.filter((id) => id !== post.id);
+										}}
+									/></Label
+								>
+							{:else if rowMedia && !missingRowMedia.has(rowMedia.id)}
+								<span
+									class="flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-md border bg-muted"
+								>
+									{#if rowMedia.poster_thumbnail_url}
+										<img
+											src={getAuthenticatedMediaURL(rowMedia.poster_thumbnail_url)}
+											alt=""
+											loading="lazy"
+											class="size-full object-cover"
+											onerror={() => missingRowMedia.add(rowMedia.id)}
+										/>
+									{:else}
+										<MediaPreviewImage
+											mediaId={rowMedia.id}
+											alt=""
+											class="size-full object-cover"
+											onMissing={() => missingRowMedia.add(rowMedia.id)}
+										/>
+									{/if}
+								</span>
+							{/if}
+							<a
+								href={resolveAppPath(post.href)}
+								dir="auto"
+								class="min-w-0 flex-1 truncate rounded-sm text-sm font-medium text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+							>
+								{truncate(postText(post), 140)}
+							</a>
+							{#if post.isThread}
+								<span class="hidden shrink-0 text-xs text-muted-foreground sm:inline">
+									{threadPostCount(post.postCount)}
+								</span>
+							{/if}
+							{#if post.publication.review_state === 'pending'}
+								<span class="hidden shrink-0 text-xs text-muted-foreground sm:inline"
+									>{m.review_pending()}</span
+								>
+							{:else if post.publication.review_state === 'needs_review'}
+								<span class="hidden shrink-0 text-xs text-muted-foreground sm:inline"
+									>{m.review_needs_review()}</span
+								>
+							{:else if post.publication.review_state === 'changes_requested'}
+								<span class="shrink-0 text-xs text-destructive">{m.review_changes_requested()}</span
+								>
+							{:else if post.publication.review_state === 'approved'}
+								<span class="hidden shrink-0 text-xs text-muted-foreground sm:inline"
+									>{m.review_approved()}</span
+								>
+							{/if}
+							{@render destinationMarks(post, accountDestinations)}
+							{#if statusBadgeLabel(post)}
+								<span
+									class={`shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs font-medium ${statusClass(post)}`}
+								>
+									{statusBadgeLabel(post)}
+								</span>
+							{/if}
+							<time
+								datetime={publicationActivityOccurrence(post)}
+								class="hidden shrink-0 text-xs text-muted-foreground sm:inline"
+							>
+								{formatDateTime(publicationActivityOccurrence(post))}
+							</time>
+							{#if activeTab !== 'drafts'}
+								<Button
+									variant="ghost"
+									size="icon-sm"
+									class="shrink-0"
+									onclick={() => goto(resolveAppPath(post.href))}
+									aria-label={post.status === 'published' || post.status === 'publishing'
+										? m.activity_view_post({ title: truncate(postText(post), 40) })
+										: m.activity_edit_post({ title: truncate(postText(post), 40) })}
+								>
+									{#if post.status === 'published' || post.status === 'publishing'}
+										<ThemeIcon role="eye" class="size-4" />
+									{:else}
+										<ThemeIcon role="edit" class="size-4" />
+									{/if}
+								</Button>
+							{/if}
+						</div>
+						{@render deliveryDetails(post, accountDestinations)}
+					{/if}
+				</article>
+			{/each}
+		</div>
+	{/if}
+{/snippet}
+
+<svelte:head>
+	<title>{m.activity_title()} — {appBranding.profile.display_name}</title>
+</svelte:head>
+
+<Tabs value={activeTab} onValueChange={selectActivityTab} class="min-w-0 flex-1">
+	<PageContainer
+		title={m.activity_title()}
+		headerActionLayout={selecting ? 'responsive' : 'inline'}
+		themeIconRole="publications"
+		loading={initialLoading}
+		loadingLayout={inventoryView === 'grid' ? 'grid' : 'list'}
+		loadingMessage={offlinePaused ? m.app_offline_title() : m.common_loading()}
+	>
+		{#snippet navigation()}
+			<div class="flex flex-col gap-3">
+				<TabsList class="no-scrollbar">
+					<TabsTrigger value="scheduled">{m.activity_tab_scheduled()}</TabsTrigger>
+					<TabsTrigger value="published">{m.activity_tab_published()}</TabsTrigger>
+					<TabsTrigger value="failed">{m.activity_tab_failed()}</TabsTrigger>
+					<TabsTrigger value="drafts">{m.activity_tab_drafts()}</TabsTrigger>
+				</TabsList>
+				<div class="flex w-full flex-wrap items-center gap-2">
+					<PublicationViewSwitch view={inventoryView} />
+					<ListSearch
+						bind:value={searchQuery}
+						label={m.engagement_search_posts()}
+						class="min-w-0 flex-1 sm:w-56"
+					/>
+					<Tooltip.Root>
+						<Tooltip.Trigger>
+							{#snippet child({ props })}
+								<Button
+									{...props}
+									variant="outline"
+									size="icon-sm"
+									aria-label={m.common_refresh()}
+									onclick={() => loadData()}
+									disabled={loading}
+								>
+									<ThemeIcon
+										role="refresh"
+										class={`size-4 ${loading ? 'animate-spin motion-reduce:animate-none' : ''}`}
+									/>
+								</Button>
+							{/snippet}
+						</Tooltip.Trigger>
+						<Tooltip.Content><p class="text-sm">{m.common_refresh()}</p></Tooltip.Content>
+					</Tooltip.Root>
+				</div>
+			</div>
+		{/snippet}
+		{#snippet actions()}
+			{#if workspaceCtx.currentWorkspace?.can_edit}
+				{#if activeTab === 'drafts'}
+					<Button
+						variant="ghost"
+						size="sm"
+						onclick={() => {
+							selecting = !selecting;
+							selectedIds = [];
+						}}>{selecting ? m.common_cancel() : m.batch_select()}</Button
+					>
+					{#if selecting}<BatchScheduleDialog
+							workspaceId={currentWorkspaceID}
+							publicationIds={selectedIds}
+						/>{/if}
+				{/if}
+			{/if}
+		{/snippet}
+
+		{#if visibleError}
+			<InlineNotice
+				tone={currentViewLoaded && !error ? 'warning' : 'error'}
+				message={visibleError}
+				onDismiss={() => {
+					error = '';
+					queryError = '';
+				}}
+				dismissLabel={m.common_dismiss()}
+			>
+				{#snippet actions()}
+					<Button variant="outline" size="sm" onclick={() => loadData()}
+						>{m.common_refresh()}</Button
+					>
+				{/snippet}
+			</InlineNotice>
+		{/if}
+		{#if successMessage}
+			<InlineNotice
+				tone="success"
+				message={successMessage}
+				onDismiss={() => (successMessage = '')}
+				dismissLabel={m.common_dismiss()}
+			/>
+		{/if}
+		{#if currentViewLoaded && (searchTerm || publicationsInfinite.hasNextPage)}
+			<div class="mb-3 flex items-center justify-between gap-3">
+				<div class="min-w-0">
+					<p class="mt-0.5 text-xs text-muted-foreground">
+						{searchQuery
+							? m.posts_search_results({ count: publicationPage.total, query: searchQuery })
+							: m.posts_results_count({ shown: activePosts.length, total: publicationPage.total })}
+					</p>
+				</div>
+				{#if searchQuery}
+					<Button variant="ghost" size="sm" class="shrink-0" onclick={() => (searchQuery = '')}>
+						{m.posts_clear_search()}
+					</Button>
+				{/if}
+			</div>
+		{/if}
+		{#if currentViewLoaded}
+			<TabsContent value="scheduled">
+				{@render postList(
+					scheduledPosts,
+					m.activity_empty_scheduled_title(),
+					m.activity_empty_scheduled_body()
+				)}
+			</TabsContent>
+			<TabsContent value="published">
+				{@render postList(
+					publishedPosts,
+					m.activity_empty_published_title(),
+					m.activity_empty_published_body()
+				)}
+			</TabsContent>
+			<TabsContent value="failed">
+				{#if failureGroups.length > 0}
+					<div class="mb-6 space-y-3" role="group" aria-label={m.activity_recovery_queue()}>
+						{#each failureGroups as group (group.key)}
+							<div
+								class="flex flex-col gap-3 rounded-xl border bg-muted/20 p-4 sm:flex-row sm:items-center"
+							>
+								<div class="min-w-0 flex-1">
+									<p class="font-medium">{group.label}</p>
+									<p class="mt-1 text-sm text-muted-foreground">
+										{group.postIDs.size === 1
+											? m.activity_recovery_affected_one()
+											: m.activity_recovery_affected({ count: group.postIDs.size })}
+										{#if group.sampleDestination.error_message}
+											· {group.sampleDestination.error_message}
+										{/if}
+									</p>
+								</div>
+								<Button
+									variant="outline"
+									size="sm"
+									onclick={() => runDestinationAction(group.samplePost, group.sampleDestination)}
+									disabled={retryingDestination ===
+										`${group.samplePost.id}:${group.sampleDestination.social_account_id}:${group.sampleDestination.target_key}`}
+								>
+									{destinationActionLabel(group.sampleDestination)}
+								</Button>
+							</div>
+						{/each}
+					</div>
+				{/if}
+				{@render postList(
+					failedPosts,
+					m.activity_empty_failed_title(),
+					m.activity_empty_failed_body()
+				)}
+				{#if failedJobs.length > 0}
+					<Disclosure
+						summary={m.activity_technical_details({ count: failedJobsPage.total })}
+						class="mt-6 border-t pt-4"
+						summaryClass="text-destructive"
+					>
+						<p class="mt-2 max-w-2xl text-xs leading-5 text-muted-foreground">
+							{m.activity_technical_details_description()}
+						</p>
+						<div class="mt-3 divide-y rounded-md bg-muted/35 px-4">
+							{#each failedJobs as job (job.id)}
+								<div class="flex items-start justify-between gap-4 py-3 text-sm">
+									<div>
+										<p class="font-medium">{job.type.replaceAll('_', ' ')}</p>
+										<p class="mt-1 text-xs text-destructive">
+											{job.last_error || m.activity_delivery_failed()}
+										</p>
+									</div>
+									{#if failedJobHref(job)}
+										<Button
+											variant="ghost"
+											size="sm"
+											onclick={() => goto(resolveAppPath(failedJobHref(job)))}
+											>{m.activity_open_post()}</Button
+										>
+									{/if}
+								</div>
+							{/each}
+						</div>
+						<div class="flex min-h-10 items-center justify-between gap-3 py-3">
+							<span class="text-xs text-muted-foreground tabular-nums" aria-live="polite">
+								{failedJobs.length} / {failedJobsPage.total}
+							</span>
+							{#if failedJobsInfinite.hasNextPage}
+								<Button
+									variant="outline"
+									size="sm"
+									disabled={loading || failedJobsInfinite.isFetchingNextPage}
+									onclick={loadMoreFailedJobs}
+								>
+									{#if failedJobsInfinite.isFetchingNextPage}
+										<ThemeIcon
+											role="refresh"
+											class="mr-1.5 size-3.5 animate-spin motion-reduce:animate-none"
+										/>
+									{/if}
+									{m.activity_load_more_jobs({
+										count: Math.min(jobPageSize, failedJobsPage.total - failedJobs.length)
+									})}
+								</Button>
+							{/if}
+						</div>
+					</Disclosure>
+				{/if}
+			</TabsContent>
+			<TabsContent value="drafts">
+				{@render postList(drafts, m.activity_empty_drafts_title(), m.activity_empty_drafts_body())}
+			</TabsContent>
+			{#if publicationsInfinite.hasNextPage}
+				<div class="mt-6 flex min-h-10 items-center justify-between gap-3 border-t pt-4">
+					<span class="text-xs text-muted-foreground tabular-nums" aria-live="polite">
+						{m.posts_results_count({ shown: posts.length, total: publicationPage.total })}
+					</span>
+					<Button
+						variant="outline"
+						size="sm"
+						disabled={loading || publicationsInfinite.isFetchingNextPage}
+						onclick={loadMorePublicationHistory}
+					>
+						{#if publicationsInfinite.isFetchingNextPage}
+							<ThemeIcon
+								role="refresh"
+								class="mr-1.5 size-3.5 animate-spin motion-reduce:animate-none"
+							/>
+						{/if}
+						{m.notifications_load_more()}
+					</Button>
+				</div>
+			{/if}
+		{/if}
+	</PageContainer>
+</Tabs>

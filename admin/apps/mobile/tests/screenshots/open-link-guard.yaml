@@ -1,0 +1,8 @@
+appId: com.openpost.app
+---
+- waitForAnimationToEnd
+- runFlow:
+    when:
+      visible: "Open in.*OpenPost.*"
+    commands:
+      - tapOn: Open

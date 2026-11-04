@@ -1,0 +1,1016 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Publish an independent package without rebuilding the app
+        required: true
+        type: choice
+        options: [n8n, sdk]
+  push:
+    tags:
+      - "v*"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  BUN_VERSION: "1.3.11"
+
+permissions: {}
+
+jobs:
+  distribution-plan:
+    name: Select distributions and verify reused downloads
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sdk: ${{ steps.plan.outputs.sdk }}
+      n8n: ${{ steps.plan.outputs.n8n }}
+      cli: ${{ steps.plan.outputs.cli }}
+      notes_artifact: distribution-notes-${{ github.sha }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Plan independent distributions
+        id: plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          previous_tag="$(bun scripts/published-release-tag.mjs --exclude "$GITHUB_REF_NAME")"
+          [[ -n "$previous_tag" ]]
+          bun scripts/release-distribution-plan.mjs "$previous_tag" "$GITHUB_SHA" > distribution-plan.txt
+          cat distribution-plan.txt >> "$GITHUB_OUTPUT"
+          if grep -qx 'cli=true' distribution-plan.txt; then
+            bun -e 'const pkg=await Bun.file("packages/cli/package.json").json(); if(pkg.openpost?.releaseTag!==process.env.GITHUB_REF_NAME) throw Error("Changed CLI requires a new wrapper version pinned to this release tag before publication");'
+          fi
+          bun scripts/release-distribution-plan.mjs "$previous_tag" "$GITHUB_SHA" --json > distribution-plan.json
+          bun scripts/release-reuse-notes.mjs "$GITHUB_REF_NAME" distribution-plan.json reused-downloads.md
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: distribution-notes-${{ github.sha }}-${{ github.run_attempt }}
+          path: reused-downloads.md
+          if-no-files-found: error
+          retention-days: 31
+
+  verify-candidate:
+    name: Verify exact release candidate
+    needs: distribution-plan
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+    outputs:
+      ci_run_id: ${{ steps.candidate.outputs.run_id }}
+      frontend_artifact: ${{ steps.artifacts.outputs.frontend }}
+      android_artifact: ${{ steps.artifacts.outputs.android }}
+      mobile_changed: ${{ steps.mobile.outputs.changed }}
+      sdk_changed: ${{ needs.distribution-plan.outputs.sdk }}
+      n8n_changed: ${{ needs.distribution-plan.outputs.n8n }}
+      cli_changed: ${{ needs.distribution-plan.outputs.cli }}
+      notes_artifact: ${{ needs.distribution-plan.outputs.notes_artifact }}
+      digest: ${{ steps.image.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Require a release-valid Android identity
+        id: mobile
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          # Android keeps its own cadence. A server-only release keeps the
+          # released identity; only a release that changes a mobile surface
+          # must advance it.
+          previous_tag="$(bun scripts/published-release-tag.mjs --exclude "$GITHUB_REF_NAME")"
+          [[ -n "$previous_tag" ]]
+          git show "$previous_tag:apps/mobile/app.json" > previous-release-app.json
+          if git diff --quiet --find-renames=40% "$previous_tag" "$GITHUB_SHA" -- apps/mobile packages/api-contract packages/query-catalog packages/dither packages/platform-text packages/telemetry packages/video-project apps/web/openapi.json bunfig.toml; then
+            mobile_changed="false"
+          else
+            mobile_changed="true"
+          fi
+          echo "changed=${mobile_changed}" >> "$GITHUB_OUTPUT"
+          bun scripts/mobile-release.mjs check-release \
+            --config apps/mobile/app.json \
+            --package apps/mobile/package.json \
+            --previous-config previous-release-app.json \
+            --changed "$mobile_changed"
+      - name: Require successful CI for the tagged SHA
+        id: candidate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          # Tag CI proves the candidate with the final version embedded.
+          # Look up by branch (authoritative immediately) rather than by
+          # commit (search-indexed, can lag), then pin the exact SHA.
+          candidate=""
+          for attempt in $(seq 1 90); do
+            branch_match="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow CI \
+              --branch "$GITHUB_REF_NAME" \
+              --event push \
+              --limit 20 \
+              --json databaseId,headSha \
+              --jq '[.[] | select(.headSha == "'"$GITHUB_SHA"'")][0].databaseId // empty' || true)"
+            commit_match="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow CI \
+              --commit "$GITHUB_SHA" \
+              --event push \
+              --limit 20 \
+              --json databaseId,headBranch,headSha \
+              --jq '[.[] | select(.headBranch == "'"$GITHUB_REF_NAME"'" and .headSha == "'"$GITHUB_SHA"'")][0].databaseId // empty' || true)"
+            candidate="${branch_match:-$commit_match}"
+            if [[ -n "$candidate" ]]; then
+              echo "Found CI run $candidate for tag $GITHUB_REF_NAME on SHA $GITHUB_SHA."
+              break
+            fi
+            echo "Waiting for CI on tag $GITHUB_REF_NAME (attempt ${attempt}/90)."
+            sleep 30
+          done
+          [[ -n "$candidate" ]] || {
+            echo "No CI run exists for tag $GITHUB_REF_NAME on SHA $GITHUB_SHA." >&2
+            exit 1
+          }
+          [[ "$candidate" =~ ^[0-9]+$ ]]
+          gh run watch "$candidate" \
+            --repo "$GITHUB_REPOSITORY" \
+            --exit-status \
+            --interval 30 > /dev/null
+          echo "run_id=$candidate" >> "$GITHUB_OUTPUT"
+      - name: Resolve artifacts from their successful CI attempts
+        id: artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_RUN_ID: ${{ steps.candidate.outputs.run_id }}
+          MOBILE_CHANGED: ${{ steps.mobile.outputs.changed }}
+        shell: bash
+        run: |
+          image="$(bun scripts/ci-artifacts.mjs resolve \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$CI_RUN_ID" \
+            --prefix "image-digest-${GITHUB_SHA}-")"
+          frontend="$(bun scripts/ci-artifacts.mjs resolve \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$CI_RUN_ID" \
+            --prefix "frontend-public-${GITHUB_SHA}-")"
+          android=""
+          if [[ "$MOBILE_CHANGED" == "true" ]]; then
+            android="$(bun scripts/ci-artifacts.mjs resolve \
+              --repository "$GITHUB_REPOSITORY" \
+              --run-id "$CI_RUN_ID" \
+              --prefix "android-unsigned-${GITHUB_SHA}-")"
+          fi
+          {
+            echo "image=$image"
+            echo "frontend=$frontend"
+            echo "android=$android"
+          } >> "$GITHUB_OUTPUT"
+      - name: Verify the tested image
+        id: image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_RUN_ID: ${{ steps.candidate.outputs.run_id }}
+          IMAGE_ARTIFACT: ${{ steps.artifacts.outputs.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh run download "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$IMAGE_ARTIFACT" --dir tested-image
+          digest="$(cat tested-image/image-digest.txt)"
+          amd64_digest="$(cat tested-image/image-linux-amd64-digest.txt)"
+          arm64_digest="$(cat tested-image/image-linux-arm64-digest.txt)"
+          for tested_digest in "$digest" "$amd64_digest" "$arm64_digest"; do
+            if [[ ! "$tested_digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+              echo "Tested image artifact contains an invalid digest: $tested_digest" >&2
+              exit 1
+            fi
+          done
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin >/dev/null
+          repository="${REGISTRY}/$(printf '%s' "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')"
+          image="${repository}@${digest}"
+          docker buildx imagetools inspect --raw "$image" | jq -e \
+            --arg amd64 "$amd64_digest" \
+            --arg arm64 "$arm64_digest" '
+              [.manifests[] | select(.platform.os == "linux")] as $linux
+              | ($linux | length) == 2
+              and any($linux[]; .platform.architecture == "amd64" and .digest == $amd64)
+              and any($linux[]; .platform.architecture == "arm64" and .digest == $arm64)
+            ' >/dev/null
+          for architecture in amd64 arm64; do
+            platform_digest_variable="${architecture}_digest"
+            platform_digest="${!platform_digest_variable}"
+            platform_image="${repository}@${platform_digest}"
+            docker pull --platform "linux/${architecture}" "$platform_image"
+            image_version="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$platform_image")"
+            image_revision="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$platform_image")"
+            if [[ "$image_version" != "$GITHUB_REF_NAME" || "$image_revision" != "$GITHUB_SHA" ]]; then
+              echo "Tested linux/${architecture} image identity does not match ${GITHUB_REF_NAME} at ${GITHUB_SHA}." >&2
+              exit 1
+            fi
+          done
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+  candidate-frontend:
+    name: Resolve the candidate frontend
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      ci_run_id: ${{ steps.frontend.outputs.run_id }}
+      frontend_artifact: ${{ steps.frontend.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: scripts
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Wait for the tag CI frontend artifact
+        id: frontend
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          # Binaries build while tag CI is still proving the candidate. The
+          # draft, every upload, and promotion still wait for CI success.
+          for attempt in $(seq 1 160); do
+            run_id="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow CI \
+              --branch "$GITHUB_REF_NAME" \
+              --event push \
+              --limit 20 \
+              --json databaseId,headSha \
+              --jq '[.[] | select(.headSha == "'"$GITHUB_SHA"'")][0].databaseId // empty' || true)"
+            if [[ "$run_id" =~ ^[0-9]+$ ]]; then
+              if artifact="$(bun scripts/ci-artifacts.mjs resolve --repository "$GITHUB_REPOSITORY" --run-id "$run_id" --prefix "frontend-public-${GITHUB_SHA}-" 2>/dev/null)"; then
+                {
+                  echo "run_id=$run_id"
+                  echo "artifact=$artifact"
+                } >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              state="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json status,conclusion --jq '.status + " " + (.conclusion // "")')"
+              if [[ "$state" == completed* ]]; then
+                echo "Tag CI run $run_id finished ($state) without a frontend artifact." >&2
+                exit 1
+              fi
+            fi
+            echo "Waiting for the tag CI frontend artifact (attempt ${attempt}/160)."
+            sleep 15
+          done
+          echo "Tag CI did not publish a frontend artifact in time." >&2
+          exit 1
+
+  prepare-draft:
+    name: Prepare reusable draft release
+    runs-on: ubuntu-latest
+    needs: verify-candidate
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.verify-candidate.outputs.notes_artifact }}
+      - name: Create or verify the draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cli_scope=()
+          if [[ "${{ needs.verify-candidate.outputs.cli_changed }}" == 'false' ]]; then cli_scope=(--no-cli); fi
+          bun scripts/release-notes.mjs "$GITHUB_REF_NAME" > release-notes.md
+          cat reused-downloads.md >> release-notes.md
+          fetch_release() {
+            release_id="$(gh release view "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json databaseId \
+              --jq '.databaseId' 2>/dev/null || true)"
+            [[ "$release_id" =~ ^[0-9]+$ ]] || return 1
+            gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > draft-release.json
+          }
+          if ! fetch_release; then
+            if ! gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft \
+              --verify-tag \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file release-notes.md; then
+              echo "Draft creation raced with another attempt; validating the resulting release." >&2
+            fi
+            fetch_release
+          fi
+          bun scripts/release-assets.mjs verify "${cli_scope[@]}" \
+            --release-json draft-release.json \
+            --tag "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md
+
+  build-binaries:
+    name: Build server (${{ matrix.os }}-${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    needs: candidate-frontend
+    permissions:
+      actions: read
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - { os: linux, arch: amd64, runner: ubuntu-latest, ext: "" }
+          - { os: darwin, arch: arm64, runner: macos-latest, ext: "" }
+          - { os: windows, arch: amd64, runner: ubuntu-latest, ext: ".exe" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: apps/server/go.mod
+          cache-dependency-path: apps/server/go.sum
+      - name: Download frontend built by candidate CI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_RUN_ID: ${{ needs.candidate-frontend.outputs.ci_run_id }}
+          FRONTEND_ARTIFACT: ${{ needs.candidate-frontend.outputs.frontend_artifact }}
+        run: gh run download "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$FRONTEND_ARTIFACT" --dir apps/server/cmd/openpost/public
+      - name: Build binary
+        shell: bash
+        run: |
+          cd apps/server
+          if [[ "${{ matrix.os }}" == windows ]]; then
+            CGO_ENABLED=0 GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} go build -buildvcs=false -ldflags="-s -w -X main.version=${GITHUB_REF_NAME} -X main.commit=${GITHUB_SHA}" -o ../../openpost-server-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }} ./cmd/openpost
+          else
+            CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.version=${GITHUB_REF_NAME} -X main.commit=${GITHUB_SHA}" -o ../../openpost-server-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }} ./cmd/openpost
+          fi
+      - name: Retain the server binary for the draft release
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-asset-server-${{ matrix.os }}-${{ matrix.arch }}
+          path: openpost-server-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
+          if-no-files-found: error
+          retention-days: 7
+
+  build-cli:
+    name: Build CLI (${{ matrix.os }}-${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    needs: distribution-plan
+    if: needs.distribution-plan.outputs.cli == 'true'
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - { os: linux, arch: amd64, runner: ubuntu-latest, ext: "" }
+          - { os: linux, arch: arm64, runner: ubuntu-latest, ext: "" }
+          - { os: darwin, arch: arm64, runner: macos-latest, ext: "" }
+          - { os: windows, arch: amd64, runner: ubuntu-latest, ext: ".exe" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: apps/cli/go.mod
+          cache-dependency-path: apps/cli/go.sum
+      - name: Build CLI binaries
+        shell: bash
+        run: |
+          cd apps/cli
+          CGO_ENABLED=0 GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} go build -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" -o ../../openpost-cli-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }} ./cmd/openpost
+          CGO_ENABLED=0 GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} go build -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" -o ../../openpost-mcp-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }} ./cmd/openpost-mcp
+      - name: Checksum CLI and MCP binaries
+        shell: bash
+        run: |
+          for asset in \
+            "openpost-cli-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}" \
+            "openpost-mcp-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}"; do
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$asset" > "${asset}.sha256"
+              sha256sum --check "${asset}.sha256"
+            else
+              shasum -a 256 "$asset" > "${asset}.sha256"
+              shasum -a 256 -c "${asset}.sha256"
+            fi
+          done
+      - name: Retain CLI and MCP binaries for the draft release
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-asset-cli-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            openpost-cli-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
+            openpost-cli-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}.sha256
+            openpost-mcp-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
+            openpost-mcp-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  upload-assets:
+    name: Upload changed release binaries
+    runs-on: ubuntu-latest
+    needs: [verify-candidate, prepare-draft, candidate-frontend, build-binaries, build-cli]
+    if: ${{ !cancelled() && needs.verify-candidate.result == 'success' && needs.prepare-draft.result == 'success' && needs.candidate-frontend.result == 'success' && needs.build-binaries.result == 'success' && (needs.build-cli.result == 'success' || (needs.verify-candidate.outputs.cli_changed == 'false' && needs.build-cli.result == 'skipped')) }}
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: scripts
+      - name: Require binaries built from the verified frontend
+        env:
+          VERIFIED_RUN: ${{ needs.verify-candidate.outputs.ci_run_id }}
+          VERIFIED_FRONTEND: ${{ needs.verify-candidate.outputs.frontend_artifact }}
+          BUILT_RUN: ${{ needs.candidate-frontend.outputs.ci_run_id }}
+          BUILT_FRONTEND: ${{ needs.candidate-frontend.outputs.frontend_artifact }}
+        shell: bash
+        run: |
+          # A full CI rerun replaces the frontend artifact; rerun this workflow
+          # so the binaries embed the same bytes as the tested image.
+          [[ "$VERIFIED_RUN" == "$BUILT_RUN" && "$VERIFIED_FRONTEND" == "$BUILT_FRONTEND" ]] || {
+            echo "Binaries used $BUILT_FRONTEND from run $BUILT_RUN; CI verified $VERIFIED_FRONTEND from run $VERIFIED_RUN." >&2
+            exit 1
+          }
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-asset-*
+          path: release-assets
+          merge-multiple: true
+      - name: Upload the binaries to the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          # Promotion verifies the exact core asset set after this upload.
+          shopt -s nullglob
+          assets=(release-assets/openpost-*)
+          bash scripts/release-asset-upload.sh "${assets[@]}"
+
+  build-android:
+    name: Sign Android candidate
+    if: needs.verify-candidate.outputs.mobile_changed == 'true'
+    runs-on: ubuntu-latest
+    needs: [verify-candidate, prepare-draft]
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Download the unsigned APK built by candidate CI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_RUN_ID: ${{ needs.verify-candidate.outputs.ci_run_id }}
+          ANDROID_ARTIFACT: ${{ needs.verify-candidate.outputs.android_artifact }}
+        run: |
+          gh run download "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$ANDROID_ARTIFACT" --dir candidate-android
+          cd candidate-android
+          sha256sum --check openpost-app-android-unsigned.sha256
+      - name: Check signing secret
+        id: signing
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: echo "has_keystore=$([[ -n "$KEYSTORE_B64" ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: Decode keystore
+        if: steps.signing.outputs.has_keystore == 'true'
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          clean=$(printf '%s' "$KEYSTORE_B64" | sed -e 's/^"//;s/"$//' -e "s/^'//;s/'$//" -e 's/^data:[^,]*,//' -e 's/\\n//g' -e 's/\\r//g' | tr -d '\n\r\t ')
+          printf '%s' "$clean" | base64 -d > release-keystore.jks
+      - name: Sign the verified candidate APK
+        if: steps.signing.outputs.has_keystore == 'true'
+        env:
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          apksigner="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)"
+          [[ -x "$apksigner" ]]
+          "$apksigner" sign \
+            --ks release-keystore.jks \
+            --ks-pass env:STORE_PASSWORD \
+            --ks-key-alias "$KEY_ALIAS" \
+            --key-pass env:KEY_PASSWORD \
+            --out openpost-app-android.apk \
+            candidate-android/openpost-app-android-unsigned.apk
+          "$apksigner" verify --verbose --print-certs openpost-app-android.apk
+      - name: Refuse to publish an unsigned Android application
+        if: steps.signing.outputs.has_keystore != 'true'
+        run: |
+          echo "Android release signing credentials are required for the installable release asset." >&2
+          exit 1
+      - name: Upload the Android APK to the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          bash scripts/release-asset-upload.sh \
+            openpost-app-android.apk
+
+  promote-image:
+    name: Promote tested image
+    runs-on: ubuntu-latest
+    needs: [verify-candidate, prepare-draft, upload-assets]
+    if: ${{ !cancelled() && needs.verify-candidate.result == 'success' && needs.prepare-draft.result == 'success' && needs.upload-assets.result == 'success' }}
+    permissions:
+      actions: read
+      contents: write
+      packages: write
+    outputs:
+      digest: ${{ steps.promote.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.verify-candidate.outputs.notes_artifact }}
+      - name: Require every core draft release asset before promotion
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cli_scope=()
+          if [[ "${{ needs.verify-candidate.outputs.cli_changed }}" == 'false' ]]; then cli_scope=(--no-cli); fi
+          bun scripts/release-notes.mjs "$GITHUB_REF_NAME" > release-notes.md
+          cat reused-downloads.md >> release-notes.md
+          release_id="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json databaseId --jq '.databaseId')"
+          [[ "$release_id" =~ ^[0-9]+$ ]]
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > draft-release.json
+          # Promotion only needs the core server/CLI assets it just built.
+          # Android signs in parallel and the publish job verifies the final set.
+          bun scripts/release-assets.mjs verify "${cli_scope[@]}" \
+            --release-json draft-release.json \
+            --tag "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            --core
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Add release tags without rebuilding
+        id: promote
+        env:
+          SOURCE_DIGEST: ${{ needs.verify-candidate.outputs.digest }}
+        shell: bash
+        run: |
+          source_image="${REGISTRY}/${IMAGE_NAME}@${SOURCE_DIGEST}"
+          docker buildx imagetools create \
+            --prefer-index=false \
+            --tag "${REGISTRY}/${IMAGE_NAME}:${GITHUB_REF_NAME}" \
+            --tag "${REGISTRY}/${IMAGE_NAME}:latest" \
+            "$source_image"
+          promoted_digest="$(docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${GITHUB_REF_NAME}" | awk '$1 == "Digest:" && !found { print $2; found = 1 }')"
+          [[ "$promoted_digest" == "$SOURCE_DIGEST" ]] || {
+            echo "Promoted digest $promoted_digest does not match verified candidate $SOURCE_DIGEST." >&2
+            exit 1
+          }
+          echo "digest=$SOURCE_DIGEST" >> "$GITHUB_OUTPUT"
+
+  deploy-production:
+    name: Deploy production
+    runs-on: ubuntu-latest
+    needs: promote-image
+    if: ${{ !cancelled() && needs.promote-image.result == 'success' }}
+    timeout-minutes: 70
+    steps:
+      - name: Trigger the verified VPS deployment
+        env:
+          DEPLOY_WEBHOOK_SECRET: ${{ secrets.DEPLOY_WEBHOOK_SECRET }}
+          IMAGE_DIGEST: ${{ needs.promote-image.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          request_path=/hooks/deploy-openpost
+          issued_at=$(date +%s)
+          delivery_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA}"
+          payload=$(printf '{"repository":"%s","sha":"%s","tag":"%s","digest":"%s"}' \
+            "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$GITHUB_REF_NAME" "$IMAGE_DIGEST")
+          body_digest=$(printf '%s' "$payload" | openssl dgst -sha256 | awk '{print $2}')
+          canonical_request=$(printf 'POST\n%s\n%s\n%s\n%s' \
+            "$request_path" "$issued_at" "$delivery_id" "$body_digest")
+          signature=$(printf '%s' "$canonical_request" | openssl dgst -sha256 -hmac "$DEPLOY_WEBHOOK_SECRET" | awk '{print "sha256=" $2}')
+          response=$(curl --fail-with-body --silent --show-error \
+            --connect-timeout 10 \
+            --max-time 3660 \
+            -H 'Content-Type: application/json' \
+            -H "X-Deploy-Timestamp: $issued_at" \
+            -H "X-Deploy-Delivery: $delivery_id" \
+            -H "X-Deploy-Signature-256: $signature" \
+            --data-binary "$payload" \
+            "https://webhooks.rgo.pt$request_path")
+          printf '%s\n' "$response"
+          [ "$response" = '{"status":"completed"}' ]
+      - name: Verify public readiness, version, and revision
+        shell: bash
+        run: |
+          for _ in $(seq 1 60); do
+            info=$(curl --fail --silent --connect-timeout 2 --max-time 5 https://app.openpo.st/api/v1/version 2>/dev/null || true)
+            ready=$(curl --fail --silent --connect-timeout 2 --max-time 5 https://app.openpo.st/api/v1/ready 2>/dev/null || true)
+            revision=$(jq -r '.revision // empty' <<<"$info" 2>/dev/null || true)
+            version=$(jq -r '.version // empty' <<<"$info" 2>/dev/null || true)
+            readiness=$(jq -r '.status // empty' <<<"$ready" 2>/dev/null || true)
+            database=$(jq -r '.database // empty' <<<"$ready" 2>/dev/null || true)
+            [[ "$revision" == "$GITHUB_SHA" && "$version" == "$GITHUB_REF_NAME" && "$readiness" == ready && "$database" == ok ]] && exit 0
+            sleep 5
+          done
+          echo "Production did not become ready at $GITHUB_REF_NAME revision $GITHUB_SHA." >&2
+          exit 1
+
+  publish-n8n:
+    name: Publish and verify n8n package
+    if: "!cancelled() && ((needs.promote-image.result == 'success' && needs.verify-candidate.outputs.n8n_changed == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.package == 'n8n'))"
+    runs-on: ubuntu-latest
+    # The n8n package keeps its own publication identity and runs beside the
+    # Hosted deployment, never behind it: an npm failure must not delay or
+    # block the server rollout, and a server rollout never forces an n8n bump.
+    needs: [promote-image, verify-candidate]
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      N8N_SMOKE_VERSION: "2.35.7"
+      NPM_CLI_VERSION: "12.0.2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.19.0"
+      - name: Install the trusted-publishing npm CLI
+        run: npm install --global "npm@${NPM_CLI_VERSION}"
+      - run: bun install --frozen-lockfile
+      - name: Check the exact package source before publication
+        run: bun run check:n8n
+      - name: Publish once or reconcile the existing registry version
+        id: package
+        run: bun scripts/n8n-package-release.mjs publish
+      - name: Run the n8n community package scanner against npm
+        shell: bash
+        env:
+          PACKAGE_SPEC: ${{ steps.package.outputs.package_spec }}
+        run: |
+          set -o pipefail
+          npx --yes @n8n/scan-community-package@0.32.0 "$PACKAGE_SPEC" 2>&1 | tee n8n-package-scan.txt
+          grep -F "has passed all security checks" n8n-package-scan.txt
+      - name: Verify provenance, integrity, and a clean n8n install
+        env:
+          PACKAGE_SPEC: ${{ steps.package.outputs.package_spec }}
+          PACKAGE_INTEGRITY: ${{ steps.package.outputs.integrity }}
+        run: |
+          bun scripts/verify-published-n8n-package.mjs \
+            --package-spec "$PACKAGE_SPEC" \
+            --integrity "$PACKAGE_INTEGRITY" \
+            --n8n-version "$N8N_SMOKE_VERSION"
+
+  publish-sdk:
+    name: Publish and verify npm SDK package
+    if: "!cancelled() && ((needs.promote-image.result == 'success' && needs.verify-candidate.outputs.sdk_changed == 'true') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.package == 'sdk'))"
+    runs-on: ubuntu-latest
+    # Like the n8n package, the SDK keeps its own publication identity and
+    # runs beside the Hosted deployment, never behind it.
+    needs: [promote-image, verify-candidate]
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NPM_CLI_VERSION: "12.0.2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.19.0"
+      - name: Install the trusted-publishing npm CLI
+        run: npm install --global "npm@${NPM_CLI_VERSION}"
+      - run: bun install --frozen-lockfile
+      - name: Check the exact package sources before publication
+        run: bun scripts/tasks.mjs check npm-packages
+      - name: Publish the SDK or reconcile the existing registry version
+        id: sdk
+        run: bun scripts/npm-package-release.mjs publish --package packages/sdk
+      - name: Verify the published SDK from the registry
+        env:
+          PACKAGE_SPEC: ${{ steps.sdk.outputs.package_spec }}
+          PACKAGE_INTEGRITY: ${{ steps.sdk.outputs.integrity }}
+        run: |
+          bun scripts/verify-published-npm-package.mjs \
+            --package-spec "$PACKAGE_SPEC" \
+            --integrity "$PACKAGE_INTEGRITY" \
+            --kind sdk
+
+  publish-cli:
+    name: Publish and verify npm CLI package
+    runs-on: ubuntu-latest
+    # The wrapper installs its binaries from the public GitHub release, so
+    # unlike the SDK it publishes only after publish-release flips the draft
+    # public. A wrapper version whose binaries are unreachable must never ship.
+    needs: [promote-image, publish-release, verify-candidate]
+    if: ${{ !cancelled() && needs.promote-image.result == 'success' && needs.publish-release.result == 'success' && needs.verify-candidate.result == 'success' && needs.verify-candidate.outputs.cli_changed == 'true' }}
+    outputs:
+      cli_spec: ${{ steps.cli.outputs.package_spec }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      NPM_CLI_VERSION: "12.0.2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.19.0"
+      - name: Install the trusted-publishing npm CLI
+        run: npm install --global "npm@${NPM_CLI_VERSION}"
+      - run: bun install --frozen-lockfile
+      - name: Check the exact package sources before publication
+        run: bun scripts/tasks.mjs check npm-packages
+      - name: Publish the CLI wrapper or reconcile the existing registry version
+        id: cli
+        run: bun scripts/npm-package-release.mjs publish --package packages/cli
+      - name: Verify the published CLI wrapper from the registry
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE_SPEC: ${{ steps.cli.outputs.package_spec }}
+          PACKAGE_INTEGRITY: ${{ steps.cli.outputs.integrity }}
+        run: |
+          bun scripts/verify-published-npm-package.mjs \
+            --package-spec "$PACKAGE_SPEC" \
+            --integrity "$PACKAGE_INTEGRITY" \
+            --kind cli
+
+  verify-npm-live:
+    name: Verify live CLI install from the published release
+    runs-on: ubuntu-latest
+    # Runs after publication so the pinned GitHub release is public and the
+    # wrapper's default download path is proven exactly as users hit it.
+    # Reports only: the release is already published, so a failure here
+    # opens a follow-up instead of blocking anything.
+    needs: [publish-cli]
+    if: ${{ !cancelled() && needs.publish-cli.result == 'success' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.19.0"
+      - name: Install the published wrapper and run its default download
+        env:
+          PACKAGE_SPEC: ${{ needs.publish-cli.outputs.cli_spec }}
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          cd "$work"
+          npm init -y >/dev/null
+          npm install --ignore-scripts --no-audit --no-fund "$PACKAGE_SPEC"
+          pin="$(node -p "require('./node_modules/@getopenpost/cli/package.json').openpost.releaseTag")"
+          # The CLI prints its version to stderr, so capture both streams.
+          node ./node_modules/@getopenpost/cli/bin/openpost.js version >version.txt 2>&1
+          cat version.txt
+          grep -F "${pin#v}" version.txt
+
+  publish-release:
+    name: Publish complete deployed release
+    runs-on: ubuntu-latest
+    # build-android is intentionally not a need: a skipped need would skip
+    # publication. Server-only releases publish core assets; mobile releases
+    # wait below for the parallel signing job to attach its APK.
+    needs: [verify-candidate, prepare-draft, upload-assets, promote-image, deploy-production]
+    if: ${{ !cancelled() && needs.verify-candidate.result == 'success' && needs.prepare-draft.result == 'success' && needs.upload-assets.result == 'success' && needs.promote-image.result == 'success' && needs.deploy-production.result == 'success' }}
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.verify-candidate.outputs.notes_artifact }}
+      - name: Verify the exact asset set and publish the draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MOBILE_CHANGED: ${{ needs.verify-candidate.outputs.mobile_changed }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cli_scope=()
+          if [[ "${{ needs.verify-candidate.outputs.cli_changed }}" == 'false' ]]; then cli_scope=(--no-cli); fi
+          # Server-only releases publish core assets without Android packaging;
+          # mobile releases verify the full set including the signed APK.
+          asset_scope="$([[ "$MOBILE_CHANGED" == 'true' ]] && echo '--complete' || echo '--core')"
+          if [[ "$MOBILE_CHANGED" == 'true' ]]; then
+            # The signing job runs in parallel; wait for its APK before the
+            # full-set verification instead of coupling the job graph.
+            for _ in $(seq 1 40); do
+              apk_count="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '[.assets[] | select(.name == "openpost-app-android.apk")] | length')"
+              [[ "$apk_count" -ge 1 ]] && break
+              sleep 30
+            done
+          fi
+          bun scripts/release-notes.mjs "$GITHUB_REF_NAME" > release-notes.md
+          cat reused-downloads.md >> release-notes.md
+          release_id="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json databaseId --jq '.databaseId')"
+          [[ "$release_id" =~ ^[0-9]+$ ]]
+          fetch_release() {
+            curl --fail --silent --show-error \
+              --connect-timeout 10 \
+              --max-time 30 \
+              --output release.json \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}"
+          }
+          fetch_release
+          bun scripts/release-assets.mjs verify "${cli_scope[@]}" \
+            --release-json release.json \
+            --tag "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            "$asset_scope"
+          gh release edit "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false \
+            --latest \
+            --verify-tag
+          fetch_release
+          bun scripts/release-assets.mjs verify "${cli_scope[@]}" \
+            --release-json release.json \
+            --tag "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            "$asset_scope" --published
+
+  record-changelog:
+    name: Record release in CHANGELOG
+    runs-on: ubuntu-latest
+    # Runs after publication so the recorded section matches exactly what
+    # shipped. The bot commit carries the automation identity, never a
+    # human author: tagging needs no changelog commit anymore.
+    needs: publish-release
+    if: ${{ !cancelled() && needs.publish-release.result == 'success' }}
+    permissions:
+      contents: write
+    steps:
+      - name: Create openpost-bot token
+        id: app-token
+        # Bot writes require the configured OpenPost GitHub App.
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.OPENPOST_BOT_APP_ID }}
+          private-key: ${{ secrets.OPENPOST_BOT_PRIVATE_KEY }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Record the published release and consume its fragments
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BOT_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BOT_SLUG" == "openpost-bot" ]] || { echo "::error::OpenPost bot credentials are required"; exit 1; }
+          bot_id="$(gh api "users/${BOT_SLUG}[bot]" --jq .id)"
+          [[ "$bot_id" =~ ^[0-9]+$ ]] || exit 1
+          git config user.name "${BOT_SLUG}[bot]"
+          git config user.email "${bot_id}+${BOT_SLUG}[bot]@users.noreply.github.com"
+          gh auth setup-git
+          bun scripts/record-release-changelog.mjs "$GITHUB_REF_NAME"
+          if [[ -z "$(git status --porcelain -- CHANGELOG.md changes)" ]]; then
+            echo "CHANGELOG already records $GITHUB_REF_NAME; nothing to push."
+            exit 0
+          fi
+          git add CHANGELOG.md changes
+          git commit -m "docs: record ${GITHUB_REF_NAME} changelog"
+          # Main may have advanced while the release pipeline ran; rebase the
+          # record commit onto it (the recorder is idempotent) and push.
+          git fetch origin main
+          git rebase origin/main
+          git push origin main
+
+  announce-discord:
+    name: Announce release in Discord
+    runs-on: ubuntu-latest
+    # The publication-event workflow covers out-of-band publishes; this job
+    # covers the normal pipeline. They cannot double-post: publishes made
+    # with GITHUB_TOKEN do not trigger other workflows.
+    needs: publish-release
+    if: ${{ !cancelled() && needs.publish-release.result == 'success' }}
+    permissions:
+      contents: read
+    steps:
+      - name: Post the release announcement
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$DISCORD_WEBHOOK_URL" ]]; then
+            echo "::notice::DISCORD_RELEASE_WEBHOOK_URL is not configured; skipping the Discord announcement."
+            exit 0
+          fi
+
+          gh release view "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json body,publishedAt,tagName,url \
+            > release.json
+
+          jq -n \
+            --arg tag "$(jq -r '.tagName' release.json)" \
+            --arg url "$(jq -r '.url' release.json)" \
+            --arg body "$(jq -r '.body // ""' release.json)" \
+            --arg published_at "$(jq -r '.publishedAt' release.json)" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            '
+              ($body | if length == 0 then
+                "See what changed and download the release assets."
+              elif length > 3500 then
+                .[0:3400] + "\n\n…"
+              else
+                .
+              end) as $summary
+              | {
+                  username: "OpenPost Releases",
+                  avatar_url: "https://avatars.githubusercontent.com/u/316708436?v=4",
+                  allowed_mentions: { parse: [] },
+                  embeds: [
+                    {
+                      title: ("🚀 OpenPost " + $tag + " is live"),
+                      url: $url,
+                      description: ($summary + "\n\n**[Read the full release notes](" + $url + ")**"),
+                      color: 12012549,
+                      thumbnail: {
+                        url: "https://avatars.githubusercontent.com/u/316708436?v=4"
+                      },
+                      fields: [
+                        {
+                          name: "Version",
+                          value: ("`" + $tag + "`"),
+                          inline: true
+                        },
+                        {
+                          name: "Use OpenPost",
+                          value: "[Open the app](https://app.openpo.st) · [Self-host](https://openpo.st/docs/guide/quickstart)",
+                          inline: true
+                        }
+                      ],
+                      footer: { text: $repository },
+                      timestamp: $published_at
+                    }
+                  ]
+                }
+            ' > discord-payload.json
+
+          curl --fail-with-body --silent --show-error \
+            --retry 3 \
+            --retry-all-errors \
+            --connect-timeout 10 \
+            --max-time 30 \
+            --header 'Content-Type: application/json' \
+            --data-binary @discord-payload.json \
+            "${DISCORD_WEBHOOK_URL}?wait=true" \
+            > /dev/null

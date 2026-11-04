@@ -1,0 +1,40 @@
+---
+title: Install on CasaOS
+description: Import OpenPost as a CasaOS customized app from a ready-to-use Compose file.
+icon: casaos
+---
+
+Import OpenPost as a CasaOS customized app with the supplied [Compose file](https://github.com/getopenpost/openpost/blob/main/deploy/casaos/docker-compose.yml). The image supports x86_64 and ARM64 devices.
+
+## What you need
+
+- A CasaOS device with the App Store available.
+- Its local IP address. The Compose file uses `10.0.0.1` as an example.
+- A public HTTPS address before you connect social accounts.
+
+Generate two [deployment secrets](/self-hosting/configuration#deployment-secrets) before importing the app.
+
+## Import the app
+
+1. Download [`deploy/casaos/docker-compose.yml`](https://github.com/getopenpost/openpost/blob/main/deploy/casaos/docker-compose.yml).
+2. Replace `10.0.0.1` with your CasaOS device's IP address in `OPENPOST_APP_URL`, `OPENPOST_PUBLIC_URL`, and `OPENPOST_MEDIA_URL`.
+3. Replace the two `REPLACE-WITH-GENERATED-...` values with the secrets you generated.
+4. In CasaOS, open the App Store, choose **"+" → Install a customized app → Import**, and paste the edited file.
+5. Check the image, port `8080`, and `openpost_data` volume, then install the app.
+6. Open `http://<your-device-ip>:8080` and create the first account. It becomes the instance administrator.
+
+CasaOS stores the environment values in the imported definition instead of a separate `.env` file. Protect your edited copy because it contains both secrets.
+
+## Before connecting providers
+
+Replace the three local URLs with your [public HTTPS addresses](/self-hosting/reverse-proxy), then import the updated definition. Keep the `openpost_data` volume. Confirm readiness through the public address before connecting providers:
+
+```sh
+curl https://post.example.com/api/v1/ready
+```
+
+## Upgrade and back up
+
+Pin the image to a release tag. Before importing an updated definition, stop OpenPost and back up `openpost_data` with the edited Compose file. It contains your secrets, so keep the backup private and off the device. Follow the [maintenance guide](/self-hosting/maintenance) to check readiness and restore a matching database backup if a rollback needs it.
+
+After installation, [configure social integrations](/self-hosting/integrations).

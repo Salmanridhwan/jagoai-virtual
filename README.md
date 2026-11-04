@@ -4,6 +4,22 @@ Kantor virtual untuk tim sosial media berbasis agent AI. Fase 0 berisi mesinnya 
 
 Dokumen rancangan lengkap ada di vault Obsidian `Proyek/jagoai-virtual/`.
 
+## Pembagian kerja
+
+Proyek ini dikerjakan tiga arah sekaligus, dan batasnya dijaga lewat folder.
+
+| Folder | Isi | Dikerjakan |
+|---|---|---|
+| `admin/` | sumber OpenPost (AGPL-3.0) sebagai admin Studio, diubah sendiri: tone warna dan fitur khusus jagoai-virtual | kamu |
+| `visual/` | visual kantor tiga dimensi, hanya frontend, tanpa backend | Darren |
+| `app/`, `tests/`, `tenant/`, `web/` | kantor 2D, gerbang kirim, jembatan OpenPost, layar Kontrol | kamu |
+| `docs/kontrak-api.md` | janji bentuk JSON antara backend dan visual | dibaca semua, diubah sepakat |
+
+`admin/` adalah salinan `getopenpost/openpost` commit `e0bc6c3`. Karena AGPL, kalau nanti
+dijalankan untuk organisasi lain, sumber versi yang dipakai wajib dibuka.
+
+Visual tidak pernah membaca berkas di `tenant/` dan tidak menulis apa pun. Semua lewat HTTP.
+
 ## Menjalankan uji
 
 ```bash

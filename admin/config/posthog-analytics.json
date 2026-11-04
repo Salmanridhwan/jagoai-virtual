@@ -1,0 +1,1295 @@
+{
+  "projectId": 246054,
+  "organizationId": "018ec888-6e26-0000-526e-87fa41f55a7f",
+  "project": {
+    "app_urls": ["https://openpo.st", "https://app.openpo.st", "https://openpo.st/docs"],
+    "test_account_filters_default_checked": true
+  },
+  "insights": [
+    {
+      "id": 5468194,
+      "name": "Workspace activation",
+      "description": "Workspace creation cohorts matched to activation by workspace_id, regardless of which teammate activates. Counts creations in the selected date range and activation observed within 30 days; recent cohorts are still maturing.",
+      "query": {
+        "kind": "DataTableNode",
+        "showDateRange": true,
+        "showPropertyFilter": true,
+        "showTestAccountFilters": true,
+        "source": {
+          "kind": "HogQLQuery",
+          "filters": {
+            "dateRange": {
+              "date_from": "-30d"
+            },
+            "properties": [
+              {
+                "type": "event",
+                "key": "environment",
+                "operator": "exact",
+                "value": ["production"]
+              },
+              {
+                "type": "event",
+                "key": "openpost_smoke",
+                "operator": "is_not_set"
+              },
+              {
+                "type": "event",
+                "key": "$internal_or_test_user",
+                "operator": "is_not",
+                "value": [true]
+              }
+            ],
+            "filterTestAccounts": true
+          },
+          "query": "WITH created AS (\n SELECT properties.workspace_id AS workspace_id, min(timestamp) AS created_at\n FROM events\n WHERE event = 'workspace created' AND properties.workspace_id IS NOT NULL AND {filters}\n GROUP BY workspace_id\n), activated AS (\n SELECT properties.workspace_id AS workspace_id, min(timestamp) AS activated_at\n FROM events\n WHERE event = 'workspace activated' AND properties.workspace_id IS NOT NULL\n AND properties.environment = 'production' AND properties.openpost_smoke IS NULL\n AND coalesce(properties.$internal_or_test_user, false) != true\n AND coalesce(person.properties.$internal_or_test_user, false) != true\n GROUP BY workspace_id\n)\nSELECT count() AS created_workspaces,\n countIf(activated.activated_at >= created.created_at AND activated.activated_at <= created.created_at + INTERVAL 30 DAY) AS activated_workspaces,\n round(100.0 * activated_workspaces / nullIf(created_workspaces, 0), 2) AS activation_percent\nFROM created LEFT JOIN activated ON created.workspace_id = activated.workspace_id"
+        }
+      }
+    },
+    {
+      "id": 5430950,
+      "name": "Video projects and exports",
+      "description": "Consented browser activity, including local and Cloud Video Projects. Completed exports and failures are separate. New collection requires the telemetry release.",
+      "query": {
+        "kind": "InsightVizNode",
+        "source": {
+          "kind": "TrendsQuery",
+          "series": [
+            {
+              "kind": "EventsNode",
+              "event": "video project created",
+              "math": "total"
+            },
+            {
+              "kind": "EventsNode",
+              "event": "video export completed",
+              "math": "total"
+            },
+            {
+              "kind": "EventsNode",
+              "event": "video export failed",
+              "math": "total"
+            }
+          ],
+          "dateRange": {
+            "date_from": "-30d"
+          },
+          "interval": "day",
+          "properties": [
+            {
+              "type": "event",
+              "key": "environment",
+              "operator": "exact",
+              "value": ["production"]
+            },
+            {
+              "type": "event",
+              "key": "openpost_smoke",
+              "operator": "is_not_set"
+            },
+            {
+              "type": "event",
+              "key": "$internal_or_test_user",
+              "operator": "is_not",
+              "value": [true]
+            }
+          ],
+          "filterTestAccounts": true,
+          "trendsFilter": {
+            "display": "ActionsLineGraph",
+            "showLegend": true
+          }
+        }
+      }
+    },
+    {
+      "id": 5430949,
+      "name": "Workspace setup milestones",
+      "description": "Independent authoritative milestone counts. These are not an ordered funnel and do not assume payment, connection and composition happen in one order.",
+      "query": {
+        "kind": "InsightVizNode",
+        "source": {
+          "kind": "TrendsQuery",
+          "series": [
+            {
+              "kind": "EventsNode",
+              "event": "workspace created",
+              "math": "total"
+            },
+            {
+              "kind": "EventsNode",
+              "event": "destination connected",
+              "math": "total"
+            },
+            {
+              "kind": "EventsNode",
+              "event": "first composition started",
+              "math": "total"
+            },
+            {
+              "kind": "EventsNode",
+              "event": "workspace activated",
+              "math": "total"
+            }
+          ],
+          "dateRange": {
+            "date_from": "-30d"
+          },
+          "interval": "day",
+          "properties": [
+            {
+              "type": "event",
+              "key": "environment",
+              "operator": "exact",
+              "value": ["production"]
+            },
+            {
+              "type": "event",
+              "key": "openpost_smoke",
+              "operator": "is_not_set"
+            },
+            {
+              "type": "event",
+              "key": "$internal_or_test_user",
+              "operator": "is_not",
+              "value": [true]
+            }
+          ],
+          "filterTestAccounts": true,
+          "trendsFilter": {
+            "display": "ActionsLineGraph",
+            "showLegend": true
+          }
+        }
+      }
+    },
+    {
+      "id": 5430948,
+      "name": "Checkout creation by plan",
+      "description": "Authoritative Hosted checkout sessions created, grouped by plan_id. Completed checkouts are measured separately.",
+      "query": {
+        "kind": "InsightVizNode",
+        "source": {
+          "kind": "TrendsQuery",
+          "series": [
+            {
+              "kind": "EventsNode",
+              "event": "billing checkout created",
+              "math": "total"
+            }
+          ],
+          "dateRange": {
+            "date_from": "-30d"
+          },
+          "interval": "day",
+          "properties": [
+            {
+              "type": "event",
+              "key": "environment",
+              "operator": "exact",
+              "value": ["production"]
+            },
+            {
+              "type": "event",
+              "key": "openpost_smoke",
+              "operator": "is_not_set"
+            },
+            {
+              "type": "event",
+              "key": "$internal_or_test_user",
+              "operator": "is_not",
+              "value": [true]
+            }
+          ],
+          "filterTestAccounts": true,
+          "trendsFilter": {
+            "display": "ActionsBar",
+            "showLegend": true
+          },
+          "breakdownFilter": {
+            "breakdown": "plan_id",
+            "breakdown_type": "event"
+          }
+        }
+      }
+    },
+    {
+      "id": 5430947,
+      "name": "Publishing outcomes",
+      "description": "Authoritative publication schedule/queue outcomes and destination successes/failures. A publication can have several destination outcomes; these are not unique post counts.",
+      "query": {
+        "kind": "InsightVizNode",
+        "source": {
+          "kind": "TrendsQuery",
+          "series": [
+            {
+              "kind": "EventsNode",
+              "event": "publication scheduled",
+              "math": "total"
+            },
+            {
+              "kind": "EventsNode",
+              "event": "publication queued",
+              "math": "total"
+            },
+            {
+              "kind": "EventsNode",
+              "event": "rendition published",
+              "math": "total"
+            },
+            {
+              "kind": "EventsNode",
+              "event": "rendition failed",
+              "math": "total"
+            }
+          ],
+          "dateRange": {
+            "date_from": "-30d"
+          },
+          "interval": "day",
+          "properties": [
+            {
+              "type": "event",
+              "key": "environment",
+              "operator": "exact",
+              "value": ["production"]
+            },
+            {
+              "type": "event",
+              "key": "openpost_smoke",
+              "operator": "is_not_set"
+            },
+            {
+              "type": "event",
+              "key": "$internal_or_test_user",
+              "operator": "is_not",
+              "value": [true]
+            }
+          ],
+          "filterTestAccounts": true,
+          "trendsFilter": {
+            "display": "ActionsLineGraph",
+            "showLegend": true
+          }
+        }
+      }
+    },
+    {
+      "id": 5430946,
+      "name": "Image creation to export",
+      "description": "Consented image-editor creation to completed export within 30 days. This measures creative activity, not paid customer activation.",
+      "query": {
+        "kind": "InsightVizNode",
+        "source": {
+          "kind": "FunnelsQuery",
+          "series": [
+            {
+              "kind": "EventsNode",
+              "event": "image design created",
+              "math": "total"
+            },
+            {
+              "kind": "EventsNode",
+              "event": "image design exported",
+              "math": "total"
+            }
+          ],
+          "dateRange": {
+            "date_from": "-30d"
+          },
+          "properties": [
+            {
+              "type": "event",
+              "key": "environment",
+              "operator": "exact",
+              "value": ["production"]
+            },
+            {
+              "type": "event",
+              "key": "openpost_smoke",
+              "operator": "is_not_set"
+            },
+            {
+              "type": "event",
+              "key": "$internal_or_test_user",
+              "operator": "is_not",
+              "value": [true]
+            }
+          ],
+          "filterTestAccounts": true,
+          "funnelsFilter": {
+            "funnelVizType": "steps",
+            "funnelOrderType": "ordered",
+            "funnelWindowInterval": 30,
+            "funnelWindowIntervalUnit": "day"
+          }
+        }
+      }
+    },
+    {
+      "id": 5430631,
+      "name": "Website visits to meaningful CTAs",
+      "description": "Consented public marketing page visits to allowlisted signup, pricing, docs, tool or repository links. Automatic click capture stays disabled; new CTA collection requires the telemetry release.",
+      "query": {
+        "kind": "InsightVizNode",
+        "source": {
+          "kind": "FunnelsQuery",
+          "series": [
+            {
+              "kind": "EventsNode",
+              "event": "$pageview",
+              "math": "total"
+            },
+            {
+              "kind": "EventsNode",
+              "event": "marketing cta clicked",
+              "math": "total"
+            }
+          ],
+          "dateRange": {
+            "date_from": "-30d"
+          },
+          "properties": [
+            {
+              "type": "event",
+              "key": "environment",
+              "operator": "exact",
+              "value": ["production"]
+            },
+            {
+              "type": "event",
+              "key": "openpost_smoke",
+              "operator": "is_not_set"
+            },
+            {
+              "type": "event",
+              "key": "$internal_or_test_user",
+              "operator": "is_not",
+              "value": [true]
+            },
+            {
+              "type": "event",
+              "key": "surface",
+              "operator": "exact",
+              "value": ["marketing"]
+            }
+          ],
+          "filterTestAccounts": true,
+          "funnelsFilter": {
+            "funnelVizType": "steps",
+            "funnelOrderType": "ordered",
+            "funnelWindowInterval": 30,
+            "funnelWindowIntervalUnit": "day"
+          }
+        }
+      }
+    },
+    {
+      "id": 5430630,
+      "name": "Public website referrers",
+      "description": "Referring domains for consenting marketing and documentation visitors. Separate from product engagement.",
+      "query": {
+        "kind": "InsightVizNode",
+        "source": {
+          "kind": "TrendsQuery",
+          "series": [
+            {
+              "kind": "EventsNode",
+              "event": "$pageview",
+              "math": "dau"
+            }
+          ],
+          "dateRange": {
+            "date_from": "-7d"
+          },
+          "interval": "day",
+          "properties": [
+            {
+              "type": "event",
+              "key": "environment",
+              "operator": "exact",
+              "value": ["production"]
+            },
+            {
+              "type": "event",
+              "key": "openpost_smoke",
+              "operator": "is_not_set"
+            },
+            {
+              "type": "event",
+              "key": "$internal_or_test_user",
+              "operator": "is_not",
+              "value": [true]
+            },
+            {
+              "type": "event",
+              "key": "surface",
+              "operator": "exact",
+              "value": ["marketing", "docs"]
+            }
+          ],
+          "filterTestAccounts": true,
+          "trendsFilter": {
+            "display": "ActionsBarValue",
+            "showLegend": true
+          },
+          "breakdownFilter": {
+            "breakdown": "$referring_domain",
+            "breakdown_type": "event"
+          }
+        }
+      }
+    },
+    {
+      "id": 5430629,
+      "name": "Repeat publishing",
+      "description": "Weekly return to successful publishing under the recorded author identity. This measures repeat value, not return visits or unique workspaces. Shared authors can publish in several workspaces.",
+      "query": {
+        "kind": "InsightVizNode",
+        "source": {
+          "kind": "RetentionQuery",
+          "dateRange": {
+            "date_from": "-90d"
+          },
+          "properties": [
+            {
+              "type": "event",
+              "key": "environment",
+              "operator": "exact",
+              "value": ["production"]
+            },
+            {
+              "type": "event",
+              "key": "openpost_smoke",
+              "operator": "is_not_set"
+            },
+            {
+              "type": "event",
+              "key": "$internal_or_test_user",
+              "operator": "is_not",
+              "value": [true]
+            }
+          ],
+          "filterTestAccounts": true,
+          "retentionFilter": {
+            "period": "Week",
+            "targetEntity": {
+              "id": "rendition published",
+              "type": "events"
+            },
+            "returningEntity": {
+              "id": "rendition published",
+              "type": "events"
+            },
+            "retentionType": "retention_first_time",
+            "totalIntervals": 11
+          }
+        }
+      }
+    },
+    {
+      "id": 5430628,
+      "name": "Weekly active publishing workspaces",
+      "description": "Distinct workspace_id values scheduling, queuing or successfully publishing each week. Public page visits and anonymous editors do not count.",
+      "query": {
+        "kind": "InsightVizNode",
+        "source": {
+          "kind": "TrendsQuery",
+          "series": [
+            {
+              "kind": "GroupNode",
+              "name": "Workspaces scheduling, queuing or publishing",
+              "nodes": [
+                {
+                  "kind": "EventsNode",
+                  "event": "publication scheduled",
+                  "math": "total"
+                },
+                {
+                  "kind": "EventsNode",
+                  "event": "publication queued",
+                  "math": "total"
+                },
+                {
+                  "kind": "EventsNode",
+                  "event": "rendition published",
+                  "math": "total"
+                }
+              ],
+              "operator": "OR",
+              "math": "hogql",
+              "math_hogql": "count(DISTINCT properties.workspace_id)"
+            }
+          ],
+          "dateRange": {
+            "date_from": "-90d"
+          },
+          "interval": "week",
+          "properties": [
+            {
+              "type": "event",
+              "key": "environment",
+              "operator": "exact",
+              "value": ["production"]
+            },
+            {
+              "type": "event",
+              "key": "openpost_smoke",
+              "operator": "is_not_set"
+            },
+            {
+              "type": "event",
+              "key": "$internal_or_test_user",
+              "operator": "is_not",
+              "value": [true]
+            },
+            {
+              "type": "event",
+              "key": "workspace_id",
+              "operator": "is_set"
+            }
+          ],
+          "filterTestAccounts": true,
+          "trendsFilter": {
+            "display": "ActionsLineGraph",
+            "showLegend": true
+          }
+        }
+      }
+    },
+    {
+      "id": 5430627,
+      "name": "Daily active publishing workspaces",
+      "description": "Distinct workspace_id values scheduling, queuing or successfully publishing each day. This counts workspaces, not pageview identities.",
+      "query": {
+        "kind": "InsightVizNode",
+        "source": {
+          "kind": "TrendsQuery",
+          "series": [
+            {
+              "kind": "GroupNode",
+              "name": "Workspaces scheduling, queuing or publishing",
+              "nodes": [
+                {
+                  "kind": "EventsNode",
+                  "event": "publication scheduled",
+                  "math": "total"
+                },
+                {
+                  "kind": "EventsNode",
+                  "event": "publication queued",
+                  "math": "total"
+                },
+                {
+                  "kind": "EventsNode",
+                  "event": "rendition published",
+                  "math": "total"
+                }
+              ],
+              "operator": "OR",
+              "math": "hogql",
+              "math_hogql": "count(DISTINCT properties.workspace_id)"
+            }
+          ],
+          "dateRange": {
+            "date_from": "-30d"
+          },
+          "interval": "day",
+          "properties": [
+            {
+              "type": "event",
+              "key": "environment",
+              "operator": "exact",
+              "value": ["production"]
+            },
+            {
+              "type": "event",
+              "key": "openpost_smoke",
+              "operator": "is_not_set"
+            },
+            {
+              "type": "event",
+              "key": "$internal_or_test_user",
+              "operator": "is_not",
+              "value": [true]
+            },
+            {
+              "type": "event",
+              "key": "workspace_id",
+              "operator": "is_set"
+            }
+          ],
+          "filterTestAccounts": true,
+          "trendsFilter": {
+            "display": "ActionsLineGraph",
+            "showLegend": true
+          }
+        }
+      }
+    },
+    {
+      "id": 5430626,
+      "name": "Public pageviews, 7 days",
+      "description": "Consented marketing and documentation pageviews. Daily cookieless hashes are not stable people; no customer-activation claim is made from this traffic.",
+      "query": {
+        "kind": "InsightVizNode",
+        "source": {
+          "kind": "TrendsQuery",
+          "series": [
+            {
+              "kind": "EventsNode",
+              "event": "$pageview",
+              "math": "total"
+            }
+          ],
+          "dateRange": {
+            "date_from": "-7d"
+          },
+          "interval": "day",
+          "properties": [
+            {
+              "type": "event",
+              "key": "environment",
+              "operator": "exact",
+              "value": ["production"]
+            },
+            {
+              "type": "event",
+              "key": "openpost_smoke",
+              "operator": "is_not_set"
+            },
+            {
+              "type": "event",
+              "key": "$internal_or_test_user",
+              "operator": "is_not",
+              "value": [true]
+            },
+            {
+              "type": "event",
+              "key": "surface",
+              "operator": "exact",
+              "value": ["marketing", "docs"]
+            }
+          ],
+          "filterTestAccounts": true,
+          "trendsFilter": {
+            "display": "BoldNumber",
+            "showLegend": true
+          }
+        }
+      }
+    },
+    {
+      "id": 5430625,
+      "name": "Public sessions, 7 days",
+      "description": "Consented marketing and documentation visits using SDK session IDs. Cookieless measurements have limited identity continuity.",
+      "query": {
+        "kind": "InsightVizNode",
+        "source": {
+          "kind": "TrendsQuery",
+          "series": [
+            {
+              "kind": "EventsNode",
+              "event": "$pageview",
+              "math": "unique_session"
+            }
+          ],
+          "dateRange": {
+            "date_from": "-7d"
+          },
+          "interval": "day",
+          "properties": [
+            {
+              "type": "event",
+              "key": "environment",
+              "operator": "exact",
+              "value": ["production"]
+            },
+            {
+              "type": "event",
+              "key": "openpost_smoke",
+              "operator": "is_not_set"
+            },
+            {
+              "type": "event",
+              "key": "$internal_or_test_user",
+              "operator": "is_not",
+              "value": [true]
+            },
+            {
+              "type": "event",
+              "key": "surface",
+              "operator": "exact",
+              "value": ["marketing", "docs"]
+            }
+          ],
+          "filterTestAccounts": true,
+          "trendsFilter": {
+            "display": "BoldNumber",
+            "showLegend": true
+          }
+        }
+      }
+    },
+    {
+      "id": 5430624,
+      "name": "Active publishing workspaces, 30 days",
+      "description": "Distinct workspace_id values with scheduling, queueing or successful publishing in 30 days. Authoritative server outcomes cover browser and native clients independently of browser consent.",
+      "query": {
+        "kind": "InsightVizNode",
+        "source": {
+          "kind": "TrendsQuery",
+          "series": [
+            {
+              "kind": "GroupNode",
+              "name": "Workspaces scheduling, queuing or publishing",
+              "nodes": [
+                {
+                  "kind": "EventsNode",
+                  "event": "publication scheduled",
+                  "math": "total"
+                },
+                {
+                  "kind": "EventsNode",
+                  "event": "publication queued",
+                  "math": "total"
+                },
+                {
+                  "kind": "EventsNode",
+                  "event": "rendition published",
+                  "math": "total"
+                }
+              ],
+              "operator": "OR",
+              "math": "hogql",
+              "math_hogql": "count(DISTINCT properties.workspace_id)"
+            }
+          ],
+          "dateRange": {
+            "date_from": "-30d"
+          },
+          "interval": "day",
+          "properties": [
+            {
+              "type": "event",
+              "key": "environment",
+              "operator": "exact",
+              "value": ["production"]
+            },
+            {
+              "type": "event",
+              "key": "openpost_smoke",
+              "operator": "is_not_set"
+            },
+            {
+              "type": "event",
+              "key": "$internal_or_test_user",
+              "operator": "is_not",
+              "value": [true]
+            },
+            {
+              "type": "event",
+              "key": "workspace_id",
+              "operator": "is_set"
+            }
+          ],
+          "filterTestAccounts": true,
+          "trendsFilter": {
+            "display": "BoldNumber",
+            "showLegend": true
+          }
+        }
+      }
+    }
+  ],
+  "goals": [
+    {
+      "conversion_goal_id": "6b696386-0c36-4a31-a9de-91e3b2960e8f",
+      "conversion_goal_name": "Hosted waitlist joined",
+      "kind": "EventsNode",
+      "event": "hosted waitlist joined",
+      "schema_map": {},
+      "properties": [
+        {
+          "type": "event",
+          "key": "environment",
+          "operator": "exact",
+          "value": ["production"]
+        },
+        {
+          "type": "event",
+          "key": "openpost_smoke",
+          "operator": "is_not_set"
+        },
+        {
+          "type": "event",
+          "key": "$internal_or_test_user",
+          "operator": "is_not",
+          "value": [true]
+        }
+      ]
+    },
+    {
+      "conversion_goal_id": "dd886ecc-3528-46db-9427-e2d77199103f",
+      "conversion_goal_name": "Signup completed",
+      "kind": "EventsNode",
+      "event": "signup completed",
+      "schema_map": {},
+      "properties": [
+        {
+          "type": "event",
+          "key": "environment",
+          "operator": "exact",
+          "value": ["production"]
+        },
+        {
+          "type": "event",
+          "key": "openpost_smoke",
+          "operator": "is_not_set"
+        },
+        {
+          "type": "event",
+          "key": "$internal_or_test_user",
+          "operator": "is_not",
+          "value": [true]
+        }
+      ]
+    },
+    {
+      "conversion_goal_id": "c3e8c5b4-3fac-49e0-973d-1ba9fc88aa56",
+      "conversion_goal_name": "Workspace activated",
+      "kind": "EventsNode",
+      "event": "workspace activated",
+      "schema_map": {},
+      "properties": [
+        {
+          "type": "event",
+          "key": "environment",
+          "operator": "exact",
+          "value": ["production"]
+        },
+        {
+          "type": "event",
+          "key": "openpost_smoke",
+          "operator": "is_not_set"
+        },
+        {
+          "type": "event",
+          "key": "$internal_or_test_user",
+          "operator": "is_not",
+          "value": [true]
+        }
+      ]
+    }
+  ],
+  "newInsights": [
+    {
+      "name": "AI builds and Workflow outcomes",
+      "description": "Accepted AI build outcomes and separate live Workflow successes/failures. Preview and test runs do not count toward live adoption.",
+      "dashboards": [890265],
+      "query": {
+        "kind": "InsightVizNode",
+        "source": {
+          "kind": "TrendsQuery",
+          "series": [
+            {
+              "kind": "EventsNode",
+              "event": "publication build queued",
+              "math": "total"
+            },
+            {
+              "kind": "EventsNode",
+              "event": "publication build completed",
+              "math": "total"
+            },
+            {
+              "kind": "EventsNode",
+              "event": "publication build failed",
+              "math": "total"
+            },
+            {
+              "kind": "EventsNode",
+              "event": "workflow run finished",
+              "math": "total",
+              "custom_name": "Live Workflow succeeded",
+              "properties": [
+                {
+                  "type": "event",
+                  "key": "mode",
+                  "operator": "exact",
+                  "value": ["live"]
+                },
+                {
+                  "type": "event",
+                  "key": "outcome",
+                  "operator": "exact",
+                  "value": ["succeeded"]
+                }
+              ]
+            },
+            {
+              "kind": "EventsNode",
+              "event": "workflow run finished",
+              "math": "total",
+              "custom_name": "Live Workflow failed",
+              "properties": [
+                {
+                  "type": "event",
+                  "key": "mode",
+                  "operator": "exact",
+                  "value": ["live"]
+                },
+                {
+                  "type": "event",
+                  "key": "outcome",
+                  "operator": "exact",
+                  "value": ["failed"]
+                }
+              ]
+            }
+          ],
+          "dateRange": {
+            "date_from": "-30d"
+          },
+          "interval": "day",
+          "filterTestAccounts": true,
+          "properties": [
+            {
+              "type": "event",
+              "key": "environment",
+              "operator": "exact",
+              "value": ["production"]
+            },
+            {
+              "type": "event",
+              "key": "openpost_smoke",
+              "operator": "is_not_set"
+            },
+            {
+              "type": "event",
+              "key": "$internal_or_test_user",
+              "operator": "is_not",
+              "value": [true]
+            }
+          ],
+          "trendsFilter": {
+            "display": "ActionsLineGraph",
+            "showLegend": true
+          }
+        }
+      },
+      "id": 6516585
+    },
+    {
+      "name": "Documentation search and code copies",
+      "description": "Consented documentation searches after results arrive and code copies after clipboard success. Search text and copied content are never sent.",
+      "dashboards": [890217],
+      "query": {
+        "kind": "InsightVizNode",
+        "source": {
+          "kind": "TrendsQuery",
+          "series": [
+            {
+              "kind": "EventsNode",
+              "event": "docs search used",
+              "math": "total"
+            },
+            {
+              "kind": "EventsNode",
+              "event": "docs code copied",
+              "math": "total"
+            }
+          ],
+          "dateRange": {
+            "date_from": "-30d"
+          },
+          "interval": "day",
+          "filterTestAccounts": true,
+          "properties": [
+            {
+              "type": "event",
+              "key": "environment",
+              "operator": "exact",
+              "value": ["production"]
+            },
+            {
+              "type": "event",
+              "key": "openpost_smoke",
+              "operator": "is_not_set"
+            },
+            {
+              "type": "event",
+              "key": "$internal_or_test_user",
+              "operator": "is_not",
+              "value": [true]
+            },
+            {
+              "type": "event",
+              "key": "surface",
+              "operator": "exact",
+              "value": ["docs"]
+            }
+          ],
+          "trendsFilter": {
+            "display": "ActionsLineGraph",
+            "showLegend": true
+          }
+        }
+      },
+      "id": 6516588
+    },
+    {
+      "name": "Public pageviews by device",
+      "description": "Consented marketing and documentation traffic by SDK device class. A device class is not a physical device identity.",
+      "dashboards": [890217],
+      "query": {
+        "kind": "InsightVizNode",
+        "source": {
+          "kind": "TrendsQuery",
+          "series": [
+            {
+              "kind": "EventsNode",
+              "event": "$pageview",
+              "math": "total"
+            }
+          ],
+          "dateRange": {
+            "date_from": "-30d"
+          },
+          "interval": "day",
+          "filterTestAccounts": true,
+          "properties": [
+            {
+              "type": "event",
+              "key": "environment",
+              "operator": "exact",
+              "value": ["production"]
+            },
+            {
+              "type": "event",
+              "key": "openpost_smoke",
+              "operator": "is_not_set"
+            },
+            {
+              "type": "event",
+              "key": "$internal_or_test_user",
+              "operator": "is_not",
+              "value": [true]
+            },
+            {
+              "type": "event",
+              "key": "surface",
+              "operator": "exact",
+              "value": ["marketing", "docs"]
+            }
+          ],
+          "trendsFilter": {
+            "display": "ActionsLineGraph",
+            "showLegend": true
+          },
+          "breakdownFilter": {
+            "breakdown": "$device_type",
+            "breakdown_type": "event"
+          }
+        }
+      },
+      "id": 6516590
+    },
+    {
+      "name": "Product navigation by device",
+      "description": "Consented signed-in app pageviews and native screen visits by device class. This is reach, separate from authoritative publishing engagement. Native collection begins with the telemetry release.",
+      "dashboards": [890265],
+      "query": {
+        "kind": "InsightVizNode",
+        "source": {
+          "kind": "TrendsQuery",
+          "series": [
+            {
+              "kind": "GroupNode",
+              "nodes": [
+                {
+                  "kind": "EventsNode",
+                  "event": "$pageview"
+                },
+                {
+                  "kind": "EventsNode",
+                  "event": "$screen"
+                }
+              ],
+              "operator": "OR",
+              "math": "total",
+              "name": "App pageviews and native screens"
+            }
+          ],
+          "dateRange": {
+            "date_from": "-30d"
+          },
+          "interval": "day",
+          "filterTestAccounts": true,
+          "properties": [
+            {
+              "type": "event",
+              "key": "environment",
+              "operator": "exact",
+              "value": ["production"]
+            },
+            {
+              "type": "event",
+              "key": "openpost_smoke",
+              "operator": "is_not_set"
+            },
+            {
+              "type": "event",
+              "key": "$internal_or_test_user",
+              "operator": "is_not",
+              "value": [true]
+            },
+            {
+              "type": "event",
+              "key": "surface",
+              "operator": "exact",
+              "value": ["app", "mobile"]
+            },
+            {
+              "type": "event",
+              "key": "audience",
+              "operator": "exact",
+              "value": ["authenticated"]
+            }
+          ],
+          "trendsFilter": {
+            "display": "ActionsLineGraph",
+            "showLegend": true
+          },
+          "breakdownFilter": {
+            "breakdown": "$device_type",
+            "breakdown_type": "event"
+          }
+        }
+      },
+      "id": 6516592
+    },
+    {
+      "name": "Client errors by release",
+      "description": "Sanitized exceptions and rejected REST writes by app/native version or public build revision. HTTP rejection does not imply a failed publication.",
+      "dashboards": [890265],
+      "query": {
+        "kind": "InsightVizNode",
+        "source": {
+          "kind": "TrendsQuery",
+          "series": [
+            {
+              "kind": "EventsNode",
+              "event": "$exception",
+              "math": "total"
+            },
+            {
+              "kind": "EventsNode",
+              "event": "api mutation completed",
+              "math": "total",
+              "custom_name": "Rejected REST writes",
+              "properties": [
+                {
+                  "type": "event",
+                  "key": "response_class",
+                  "operator": "exact",
+                  "value": ["4xx", "5xx"]
+                }
+              ]
+            }
+          ],
+          "dateRange": {
+            "date_from": "-30d"
+          },
+          "interval": "day",
+          "filterTestAccounts": true,
+          "properties": [
+            {
+              "type": "event",
+              "key": "environment",
+              "operator": "exact",
+              "value": ["production"]
+            },
+            {
+              "type": "event",
+              "key": "openpost_smoke",
+              "operator": "is_not_set"
+            },
+            {
+              "type": "event",
+              "key": "$internal_or_test_user",
+              "operator": "is_not",
+              "value": [true]
+            }
+          ],
+          "trendsFilter": {
+            "display": "ActionsLineGraph",
+            "showLegend": true
+          },
+          "breakdownFilter": {
+            "breakdown": "coalesce(nullIf(toString(properties.version), ''), nullIf(toString(properties.revision), ''), 'unknown')",
+            "breakdown_type": "hogql"
+          }
+        }
+      },
+      "id": 6516594
+    },
+    {
+      "name": "Hosted waitlist, signup and activation outcomes",
+      "description": "Authoritative Hosted waitlist joins, created accounts and Workspace activations. Waitlist duplicates do not count, and no email addresses enter analytics. Waitlist event collection begins with the telemetry release.",
+      "dashboards": [890265],
+      "query": {
+        "kind": "InsightVizNode",
+        "source": {
+          "kind": "TrendsQuery",
+          "series": [
+            {
+              "kind": "EventsNode",
+              "event": "hosted waitlist joined",
+              "math": "total"
+            },
+            {
+              "kind": "EventsNode",
+              "event": "signup completed",
+              "math": "total"
+            },
+            {
+              "kind": "EventsNode",
+              "event": "workspace activated",
+              "math": "total"
+            }
+          ],
+          "dateRange": {
+            "date_from": "-30d"
+          },
+          "interval": "day",
+          "filterTestAccounts": true,
+          "properties": [
+            {
+              "type": "event",
+              "key": "environment",
+              "operator": "exact",
+              "value": ["production"]
+            },
+            {
+              "type": "event",
+              "key": "openpost_smoke",
+              "operator": "is_not_set"
+            },
+            {
+              "type": "event",
+              "key": "$internal_or_test_user",
+              "operator": "is_not",
+              "value": [true]
+            }
+          ],
+          "trendsFilter": {
+            "display": "ActionsLineGraph",
+            "showLegend": true
+          }
+        }
+      },
+      "id": 6516595
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+---
+title: Install OpenPost on ZimaOS with Docker Compose
+description: Import OpenPost as a ZimaOS custom app, set your device IP and secrets, then check readiness before connecting social accounts.
+icon: zimaos
+---
+
+Import OpenPost as a ZimaOS custom app with the supplied [Compose file](https://github.com/getopenpost/openpost/blob/main/deploy/zimaos/docker-compose.yml). The image supports x86_64 and ARM64 devices.
+
+## What you need
+
+- A ZimaOS device with the App Store available.
+- Its local IP address. The Compose file uses `10.0.0.1` as an example.
+- A public HTTPS address before you connect social accounts.
+
+Generate two [deployment secrets](/self-hosting/configuration#deployment-secrets) before importing the app.
+
+## Import the app
+
+1. Download [`deploy/zimaos/docker-compose.yml`](https://github.com/getopenpost/openpost/blob/main/deploy/zimaos/docker-compose.yml).
+2. Replace `10.0.0.1` with your ZimaOS device's IP address in `OPENPOST_APP_URL`, `OPENPOST_PUBLIC_URL`, and `OPENPOST_MEDIA_URL`.
+3. Replace the two `REPLACE-WITH-GENERATED-...` values with the secrets you generated.
+4. In ZimaOS, open the App Store and choose **Custom Install → Import from the Compose file**. You can paste the file contents instead.
+5. Check the image, port `8080`, and `openpost_data` volume, then install the app.
+6. Open `http://<your-device-ip>:8080` and create the first account. It becomes the instance administrator.
+
+## Before connecting providers
+
+Replace the three local URLs with your [public HTTPS addresses](/self-hosting/reverse-proxy), then import the updated definition. Keep the `openpost_data` volume. Confirm readiness through the public address before connecting providers:
+
+```sh
+curl https://post.example.com/api/v1/ready
+```
+
+## Upgrade and back up
+
+Pin the image to a release tag. Before importing an updated definition, stop OpenPost and back up `openpost_data` with the edited Compose file. It contains your secrets, so keep the backup private and off the device. Follow the [maintenance guide](/self-hosting/maintenance) to check readiness and restore a matching database backup if a rollback needs it.
+
+After installation, [configure social integrations](/self-hosting/integrations).

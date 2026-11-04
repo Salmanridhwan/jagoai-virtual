@@ -1,0 +1,540 @@
+package queue
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"io"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	_ "github.com/mattn/go-sqlite3"
+	"github.com/openpost/backend/internal/database"
+	"github.com/openpost/backend/internal/jobregistry"
+	"github.com/openpost/backend/internal/models"
+	"github.com/openpost/backend/internal/platform"
+	"github.com/openpost/backend/internal/services/crypto"
+	"github.com/openpost/backend/internal/services/engagement"
+	"github.com/openpost/backend/internal/services/providerwrite"
+	"github.com/openpost/backend/internal/services/publicationbuilder"
+	"github.com/openpost/backend/internal/services/publisher"
+	repostservice "github.com/openpost/backend/internal/services/reposts"
+	"github.com/openpost/backend/internal/services/tokenmanager"
+	"github.com/openpost/backend/internal/telemetry"
+	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/dialect/sqlitedialect"
+)
+
+type stubStorage struct{}
+
+func (stubStorage) Driver() string { return "test" }
+func (stubStorage) Save(context.Context, string, io.Reader) (string, error) {
+	return "", nil
+}
+func (stubStorage) Delete(context.Context, string) error { return nil }
+func (stubStorage) GetURL(string) string                 { return "" }
+func (stubStorage) Open(context.Context, string) (io.ReadCloser, error) {
+	return io.NopCloser(&emptyReader{}), nil
+}
+
+type recordingStorage struct {
+	deleted []string
+}
+
+func (*recordingStorage) Driver() string { return "test" }
+func (*recordingStorage) Save(context.Context, string, io.Reader) (string, error) {
+	return "", nil
+}
+func (s *recordingStorage) Delete(_ context.Context, key string) error {
+	s.deleted = append(s.deleted, key)
+	return nil
+}
+func (*recordingStorage) GetURL(string) string { return "" }
+func (*recordingStorage) Open(context.Context, string) (io.ReadCloser, error) {
+	return io.NopCloser(&emptyReader{}), nil
+}
+
+type emptyReader struct{}
+
+func (*emptyReader) Read([]byte) (int, error) { return 0, io.EOF }
+
+func createTestDB(t *testing.T) *bun.DB {
+	t.Helper()
+
+	sqldb, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?mode=memory&cache=shared", uuid.NewString()))
+	require.NoError(t, err)
+
+	db := bun.NewDB(sqldb, sqlitedialect.New())
+	for _, model := range []interface{}{(*models.Organization)(nil), (*models.Workspace)(nil), (*models.OAuthGrant)(nil), (*models.SocialAccount)(nil), (*models.Publication)(nil), (*publicationbuilder.BuildRecord)(nil), (*models.Job)(nil), (*models.ProviderWriteAttempt)(nil)} {
+		_, err = db.NewCreateTable().Model(model).IfNotExists().Exec(context.Background())
+		require.NoError(t, err)
+	}
+	now := time.Now().UTC()
+	_, err = db.NewInsert().Model(&models.Organization{ID: "organization-1", Name: "Queue", CreatedAt: now, UpdatedAt: now}).Exec(t.Context())
+	require.NoError(t, err)
+	_, err = db.NewInsert().Model(&[]models.Workspace{
+		{ID: "workspace-1", OrganizationID: "organization-1", Name: "One", CreatedAt: now},
+		{ID: "workspace-10", OrganizationID: "organization-1", Name: "Ten", CreatedAt: now},
+		{ID: "ws-1", OrganizationID: "organization-1", Name: "Refresh", CreatedAt: now},
+	}).Exec(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, jobregistry.EnsureActiveDedupeIndex(context.Background(), db))
+
+	return db
+}
+
+func TestWorkerCompletesObsoleteRefreshJobWithoutTerminalTelemetry(t *testing.T) {
+	db := createTestDB(t)
+	now := time.Now().UTC()
+	grant := models.OAuthGrant{
+		ID: "legacy:account-disconnected", WorkspaceID: "ws-1", Provider: "threads",
+		AccessTokenEnc: []byte("encrypted-access"), TokenVersion: 1,
+		ExecutionMode: "oauth2", AuthorizationEvidence: `{}`, ValidationStatus: "legacy_unverified",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	_, err := db.NewInsert().Model(&grant).Exec(t.Context())
+	require.NoError(t, err)
+	_, err = db.NewInsert().Model(&models.SocialAccount{
+		ID: "account-disconnected", WorkspaceID: "ws-1", Platform: "threads", AccountID: "threads-user",
+		OAuthGrantID: grant.ID, AccessTokenEnc: []byte{}, IsActive: false,
+	}).Exec(t.Context())
+	require.NoError(t, err)
+	_, err = db.NewUpdate().Model((*models.SocialAccount)(nil)).
+		Set("is_active = ?", false).
+		Where("id = ?", "account-disconnected").
+		Exec(t.Context())
+	require.NoError(t, err)
+	job := models.Job{
+		ID: "refresh-disconnected", Type: jobregistry.TypeRefreshToken,
+		Payload: `{"account_id":"account-disconnected"}`, Status: jobStatusPending,
+		RunAt: now.Add(-time.Minute), MaxAttempts: 1,
+	}
+	_, err = db.NewInsert().Model(&job).Exec(t.Context())
+	require.NoError(t, err)
+
+	tokens := tokenmanager.NewTokenManager(db, crypto.NewTokenEncryptor("test-key"))
+	worker := NewWorker(db, "worker-refresh", time.Hour, nil, tokens, stubStorage{})
+	recorder := &telemetry.MemoryRecorder{}
+	worker.SetTelemetry(recorder)
+
+	require.True(t, worker.processNextJobIfAvailable(t.Context()))
+	require.NoError(t, db.NewSelect().Model(&job).WherePK().Scan(t.Context()))
+	require.Equal(t, jobStatusCompleted, job.Status)
+	require.Empty(t, job.LastError)
+	require.Empty(t, recorder.Exceptions)
+}
+
+func TestWorkerFailsRefreshJobWithoutTokenManager(t *testing.T) {
+	db := createTestDB(t)
+	now := time.Now().UTC()
+	job := models.Job{
+		ID: "refresh-unconfigured", Type: jobregistry.TypeRefreshToken,
+		Payload: `{"account_id":"account-missing"}`, Status: jobStatusPending,
+		RunAt: now.Add(-time.Minute), MaxAttempts: 1,
+	}
+	_, err := db.NewInsert().Model(&job).Exec(t.Context())
+	require.NoError(t, err)
+
+	worker := NewWorker(db, "worker-refresh-unconfigured", time.Hour, nil, nil, stubStorage{})
+	recorder := &telemetry.MemoryRecorder{}
+	worker.SetTelemetry(recorder)
+
+	require.True(t, worker.processNextJobIfAvailable(t.Context()))
+	require.NoError(t, db.NewSelect().Model(&job).WherePK().Scan(t.Context()))
+	require.Equal(t, jobStatusFailed, job.Status)
+	require.Equal(t, "Token refresh failed. OpenPost will retry when the failure is temporary.", job.LastError)
+	require.Len(t, recorder.Exceptions, 1)
+	require.Equal(t, jobregistry.TypeRefreshToken, recorder.Exceptions[0].Properties["job_type"])
+}
+
+func TestWorkerFailsUnknownJobTypes(t *testing.T) {
+	t.Parallel()
+
+	db := createTestDB(t)
+	job := &models.Job{
+		ID:          "job-unknown",
+		Type:        "unknown_job",
+		Payload:     `{}`,
+		Status:      jobStatusPending,
+		RunAt:       time.Now().UTC().Add(-time.Second),
+		MaxAttempts: 1,
+	}
+	_, err := db.NewInsert().Model(job).Exec(t.Context())
+	require.NoError(t, err)
+
+	worker := NewWorker(db, "worker-test", time.Second, nil, nil, stubStorage{})
+	recorder := &telemetry.MemoryRecorder{}
+	worker.SetTelemetry(recorder)
+	require.True(t, worker.processNextJobIfAvailable(t.Context()))
+
+	stored := new(models.Job)
+	require.NoError(t, db.NewSelect().Model(stored).Where("id = ?", job.ID).Scan(t.Context()))
+	require.Equal(t, jobStatusFailed, stored.Status)
+	require.Contains(t, stored.LastError, "unsupported job type")
+	require.Len(t, recorder.Exceptions, 1)
+	require.Equal(t, "unknown_job", recorder.Exceptions[0].Properties["job_type"])
+	require.NotContains(t, recorder.Exceptions[0].Properties, "payload")
+}
+
+func TestWorkerRequeuesCurrentJobForRepostContinuation(t *testing.T) {
+	t.Parallel()
+
+	db := createTestDB(t)
+	now := time.Now().UTC()
+	job := &models.Job{
+		ID: "repost-continuation", Type: jobregistry.TypeRepostExecute, Payload: `{}`,
+		Status: jobStatusProcessing, RunAt: now.Add(-time.Minute), MaxAttempts: 1,
+		LockedAt: now, LockedBy: "worker-repost",
+	}
+	_, err := db.NewInsert().Model(job).Exec(t.Context())
+	require.NoError(t, err)
+
+	worker := NewWorker(db, "worker-repost", time.Second, nil, nil, stubStorage{})
+	worker.finishFailedJob(t.Context(), job, &repostservice.ExecutionContinuationError{RetryAfter: time.Minute})
+
+	require.NoError(t, db.NewSelect().Model(job).WherePK().Scan(t.Context()))
+	require.Equal(t, jobStatusPending, job.Status)
+	require.Zero(t, job.Attempts)
+	require.Empty(t, job.LockedBy)
+	require.True(t, job.RunAt.After(now.Add(59*time.Second)))
+}
+
+func TestWorkerQuiesceFinishesCurrentJobWithoutClaimingAnother(t *testing.T) {
+	t.Parallel()
+
+	db := createTestDB(t)
+	now := time.Now().UTC().Add(-time.Minute)
+	jobs := []models.Job{
+		{ID: "job-current", Type: jobregistry.TypeRefreshToken, Payload: `{}`, Status: jobStatusPending, RunAt: now, MaxAttempts: 1},
+		{ID: "job-next", Type: jobregistry.TypeRefreshToken, Payload: `{}`, Status: jobStatusPending, RunAt: now.Add(time.Second), MaxAttempts: 1},
+	}
+	_, err := db.NewInsert().Model(&jobs).Exec(t.Context())
+	require.NoError(t, err)
+
+	worker := NewWorker(db, "worker-drain", time.Hour, nil, nil, stubStorage{})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	worker.executors[jobregistry.ExecuteRefreshToken] = func(context.Context, *models.Job) error {
+		close(started)
+		<-release
+		return nil
+	}
+	workerCtx, cancelWorker := context.WithCancel(t.Context())
+	t.Cleanup(cancelWorker)
+	go worker.Start(workerCtx)
+	<-started
+
+	worker.Quiesce()
+	deadlineCtx, cancelDeadline := context.WithTimeout(t.Context(), 25*time.Millisecond)
+	require.ErrorIs(t, worker.Wait(deadlineCtx), context.DeadlineExceeded)
+	cancelDeadline()
+
+	close(release)
+	waitCtx, cancelWait := context.WithTimeout(t.Context(), time.Second)
+	t.Cleanup(cancelWait)
+	require.NoError(t, worker.Wait(waitCtx))
+
+	// Quiesce must let the in-flight job reach its durable terminal state, not
+	// merely return once the executor function returned.
+	var current models.Job
+	require.NoError(t, db.NewSelect().Model(&current).Where("id = ?", "job-current").Scan(t.Context()))
+	require.Equal(t, jobStatusCompleted, current.Status)
+	require.Empty(t, current.LockedBy)
+	require.True(t, current.LockedAt.IsZero())
+
+	var next models.Job
+	require.NoError(t, db.NewSelect().Model(&next).Where("id = ?", "job-next").Scan(t.Context()))
+	require.Equal(t, jobStatusPending, next.Status)
+}
+
+func TestWorkerPersistsInterruptedJobBeforeExiting(t *testing.T) {
+	t.Parallel()
+
+	db := createTestDB(t)
+	job := models.Job{
+		ID: "job-interrupted", Type: jobregistry.TypeRefreshToken, Payload: `{}`,
+		Status: jobStatusPending, RunAt: time.Now().UTC().Add(-time.Minute), MaxAttempts: 2,
+	}
+	_, err := db.NewInsert().Model(&job).Exec(t.Context())
+	require.NoError(t, err)
+
+	worker := NewWorker(db, "worker-interrupted", time.Hour, nil, nil, stubStorage{})
+	started := make(chan struct{})
+	worker.executors[jobregistry.ExecuteRefreshToken] = func(ctx context.Context, _ *models.Job) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	workerCtx, cancelWorker := context.WithCancel(t.Context())
+	go worker.Start(workerCtx)
+	<-started
+	cancelWorker()
+
+	waitCtx, cancelWait := context.WithTimeout(t.Context(), time.Second)
+	t.Cleanup(cancelWait)
+	require.NoError(t, worker.Wait(waitCtx))
+
+	require.NoError(t, db.NewSelect().Model(&job).WherePK().Scan(t.Context()))
+	require.NotEqual(t, jobStatusProcessing, job.Status)
+	require.Empty(t, job.LockedBy)
+}
+
+func TestStorageDeletionRejectsTraversal(t *testing.T) {
+	t.Parallel()
+
+	worker := NewWorker(nil, "worker-test", time.Second, nil, nil, &recordingStorage{})
+	err := worker.handleStorageDelete(t.Context(), `{"keys":["../outside"]}`)
+	require.ErrorContains(t, err, "invalid key")
+}
+
+func TestProviderFailureTelemetryWaitsForTerminalAttempt(t *testing.T) {
+	db := createTestDB(t)
+	defer db.Close()
+	worker := NewWorker(db, "diagnostics-worker", time.Second, nil, nil, stubStorage{})
+	recorder := &telemetry.MemoryRecorder{}
+	worker.SetTelemetry(recorder)
+	job := &models.Job{ID: "diagnostic-job", Type: jobregistry.TypePublishPublication, Payload: `{"private":"customer prose"}`, Status: jobStatusProcessing, LockedBy: "diagnostics-worker", MaxAttempts: 2, RunAt: time.Now().UTC()}
+	_, err := db.NewInsert().Model(job).Exec(t.Context())
+	require.NoError(t, err)
+	providerErr := platform.NewHTTPError(503, nil, []byte(`{"error":{"code":24,"error_subcode":4279009,"message":"Hello from Acme","fbtrace_id":"trace123"}}`))
+	worker.finishFailedJob(t.Context(), job, providerErr)
+	require.Empty(t, recorder.Exceptions)
+	_, err = db.NewUpdate().Model((*models.Job)(nil)).Set("status = ?", jobStatusProcessing).Set("locked_by = ?", worker.workerID).Where("id = ?", job.ID).Exec(t.Context())
+	require.NoError(t, err)
+	worker.finishFailedJob(t.Context(), job, &publisher.RetryableError{Failure: publisher.ClassifyFailure(providerErr)})
+	require.Len(t, recorder.Exceptions, 1)
+	props := recorder.Exceptions[0].Properties
+	require.Equal(t, "4279009", props["error_subcode"])
+	require.Equal(t, "24", props["error_code"])
+	require.Equal(t, 503, props["http_status"])
+	require.NotContains(t, fmt.Sprint(props), "Hello from Acme")
+	require.NotContains(t, fmt.Sprint(props), "customer prose")
+}
+
+func seedTerminalJobPublication(t *testing.T, db *bun.DB) {
+	t.Helper()
+	now := time.Now().UTC()
+	_, err := db.NewInsert().Model(&models.Publication{
+		ID: "publication-terminal", WorkspaceID: "workspace-10", CreatedByID: "user-1",
+		Title: "Launch", ContentProfile: models.ContentProfileShortText,
+		SourceText: "Launch", SourceContent: "Launch",
+		Status: models.PublicationStatusScheduled, CreatedAt: now, UpdatedAt: now,
+	}).Exec(t.Context())
+	require.NoError(t, err)
+}
+
+func finishTerminalJob(t *testing.T, db *bun.DB, worker *BackgroundWorker, job *models.Job, processErr error) {
+	t.Helper()
+	job.Status = jobStatusProcessing
+	job.LockedBy = worker.workerID
+	job.MaxAttempts = 1
+	_, err := db.NewInsert().Model(job).Exec(t.Context())
+	require.NoError(t, err)
+	worker.finishFailedJob(t.Context(), job, processErr)
+}
+
+func TestTerminalFailureCarriesPublishWorkspaceID(t *testing.T) {
+	db := createTestDB(t)
+	defer db.Close()
+	seedTerminalJobPublication(t, db)
+	worker := NewWorker(db, "workspace-worker", time.Second, nil, nil, stubStorage{})
+	recorder := &telemetry.MemoryRecorder{}
+	worker.SetTelemetry(recorder)
+	// Current rows resolve through scope_id; legacy rows through the payload.
+	finishTerminalJob(t, db, worker, &models.Job{
+		ID: "terminal-scope", Type: jobregistry.TypePublishPublication, ScopeID: "publication-terminal",
+		Payload: `{"publication_id":"publication-terminal"}`, RunAt: time.Now().UTC(),
+	}, errors.New("provider exploded"))
+	finishTerminalJob(t, db, worker, &models.Job{
+		ID: "terminal-payload", Type: jobregistry.TypePublishPost,
+		Payload: `{"publication_id":"publication-terminal"}`, RunAt: time.Now().UTC(),
+	}, errors.New("provider exploded"))
+	// Unknown publications report unknown impact instead of inventing it.
+	finishTerminalJob(t, db, worker, &models.Job{
+		ID: "terminal-unknown", Type: jobregistry.TypePublishPublication, ScopeID: "publication-missing",
+		Payload: `{"publication_id":"publication-missing"}`, RunAt: time.Now().UTC(),
+	}, errors.New("provider exploded"))
+
+	require.Len(t, recorder.Exceptions, 3)
+	require.Equal(t, "workspace-10", recorder.Exceptions[0].WorkspaceID)
+	require.Equal(t, "workspace-10", recorder.Exceptions[1].WorkspaceID)
+	require.Empty(t, recorder.Exceptions[2].WorkspaceID)
+}
+
+func TestTerminalFailureCarriesRefreshAndCleanupWorkspaceIDs(t *testing.T) {
+	db := createTestDB(t)
+	defer db.Close()
+	now := time.Now().UTC()
+	_, err := db.NewInsert().Model(&models.SocialAccount{
+		ID: "account-terminal", WorkspaceID: "workspace-10", Platform: "threads", AccountID: "threads-user",
+		AccessTokenEnc: []byte{}, CreatedAt: now,
+	}).Exec(t.Context())
+	require.NoError(t, err)
+	_, err = db.NewInsert().Model(&models.OAuthGrant{
+		ID: "grant-terminal", WorkspaceID: "workspace-1", Provider: "threads",
+		AccessTokenEnc: []byte("encrypted-access"), TokenVersion: 1,
+		ExecutionMode: "oauth2", AuthorizationEvidence: `{}`, ValidationStatus: "legacy_unverified",
+		CreatedAt: now, UpdatedAt: now,
+	}).Exec(t.Context())
+	require.NoError(t, err)
+	worker := NewWorker(db, "workspace-worker", time.Second, nil, nil, stubStorage{})
+	recorder := &telemetry.MemoryRecorder{}
+	worker.SetTelemetry(recorder)
+	finishTerminalJob(t, db, worker, &models.Job{
+		ID: "terminal-refresh-account", Type: jobregistry.TypeRefreshToken,
+		Payload: `{"account_id":"account-terminal"}`, RunAt: time.Now().UTC(),
+	}, errors.New("refresh exploded"))
+	finishTerminalJob(t, db, worker, &models.Job{
+		ID: "terminal-refresh-grant", Type: jobregistry.TypeRefreshToken,
+		Payload: `{"grant_id":"grant-terminal"}`, RunAt: time.Now().UTC(),
+	}, errors.New("refresh exploded"))
+	// Malformed payloads stay unknown rather than failing the failure path.
+	finishTerminalJob(t, db, worker, &models.Job{
+		ID: "terminal-malformed", Type: jobregistry.TypeRefreshToken,
+		Payload: `not json`, RunAt: time.Now().UTC(),
+	}, errors.New("refresh exploded"))
+
+	// A retryable media_cleanup failure requeues through its recurrence
+	// instead of terminally failing, so it emits no exception. The payload
+	// decoder itself still resolves the known workspace for direct use.
+	require.Equal(t, "workspace-1", mediaCleanupJobWorkspaceID(`{"workspace_id":"workspace-1"}`))
+	require.Empty(t, mediaCleanupJobWorkspaceID(`not json`))
+
+	require.Len(t, recorder.Exceptions, 3)
+	require.Equal(t, "workspace-10", recorder.Exceptions[0].WorkspaceID)
+	require.Equal(t, "workspace-1", recorder.Exceptions[1].WorkspaceID)
+	require.Empty(t, recorder.Exceptions[2].WorkspaceID)
+}
+
+func TestTerminalFailureCarriesPublicationBuildWorkspaceID(t *testing.T) {
+	db := createTestDB(t)
+	defer db.Close()
+	now := time.Now().UTC()
+	_, err := db.NewInsert().Model(&publicationbuilder.BuildRecord{
+		ID: "build-terminal", WorkspaceID: "workspace-10", CreatedByID: "user-1",
+		State: publicationbuilder.BuildStateQueued, Phase: publicationbuilder.BuildPhaseQueued, Revision: 1,
+		IdempotencyKey: "terminal-build", RequestFingerprint: "fingerprint",
+		AuthorityJSON: "{}", RequestJSON: "{}", VoiceSnapshotJSON: "{}",
+		ResultJSON: "{}", UsageJSON: "{}", CreatedAt: now, UpdatedAt: now,
+	}).Exec(t.Context())
+	require.NoError(t, err)
+	worker := NewWorker(db, "workspace-worker", time.Second, nil, nil, stubStorage{})
+	recorder := &telemetry.MemoryRecorder{}
+	worker.SetTelemetry(recorder)
+	// Build jobs resolve through scope_id, with a payload fallback.
+	finishTerminalJob(t, db, worker, &models.Job{
+		ID: "terminal-build-scope", Type: jobregistry.TypePublicationBuild, ScopeID: "build-terminal",
+		Payload: `{"build_id":"build-terminal"}`, RunAt: time.Now().UTC(),
+	}, errors.New("builder exploded hard"))
+	finishTerminalJob(t, db, worker, &models.Job{
+		ID: "terminal-build-payload", Type: jobregistry.TypePublicationBuild,
+		Payload: `{"build_id":"build-terminal"}`, RunAt: time.Now().UTC(),
+	}, errors.New("builder exploded hard"))
+	finishTerminalJob(t, db, worker, &models.Job{
+		ID: "terminal-build-unknown", Type: jobregistry.TypePublicationBuild, ScopeID: "build-missing",
+		Payload: `{"build_id":"build-missing"}`, RunAt: time.Now().UTC(),
+	}, errors.New("builder exploded hard"))
+
+	require.Len(t, recorder.Exceptions, 3)
+	require.Equal(t, "workspace-10", recorder.Exceptions[0].WorkspaceID)
+	require.Equal(t, "workspace-10", recorder.Exceptions[1].WorkspaceID)
+	require.Empty(t, recorder.Exceptions[2].WorkspaceID)
+}
+
+func TestWorkerPendingPublicationDoesNotExhaustRetries(t *testing.T) {
+	db := createTestDB(t)
+	now := time.Now().UTC()
+	job := &models.Job{ID: "inbox-continuation", Type: jobregistry.TypePublishPublication, Payload: `{}`, Status: jobStatusProcessing, RunAt: now, MaxAttempts: 1, LockedAt: now, LockedBy: "worker"}
+	_, err := db.NewInsert().Model(job).Exec(t.Context())
+	require.NoError(t, err)
+	worker := NewWorker(db, "worker", time.Second, nil, nil, stubStorage{})
+	worker.finishFailedJob(t.Context(), job, &publisher.RetryableError{Failure: publisher.Failure{Code: "tiktok_inbox_delivered", Retryable: true, RetryAfter: 15 * time.Minute, Message: "Finish publishing in TikTok"}})
+	require.NoError(t, db.NewSelect().Model(job).WherePK().Scan(t.Context()))
+	require.Equal(t, jobStatusPending, job.Status)
+	require.Zero(t, job.Attempts)
+	require.True(t, job.RunAt.After(now.Add(14*time.Minute)))
+}
+
+type terminalBuildStub struct{}
+
+func (terminalBuildStub) Build(context.Context, publicationbuilder.BuildInput) (publicationbuilder.BuildResult, error) {
+	return publicationbuilder.BuildResult{}, errors.New("unused builder")
+}
+func TestExhaustedBuildJobReportsCommittedDomainFailure(t *testing.T) {
+	db := createTestDB(t)
+	defer db.Close()
+	now := time.Now().UTC()
+	_, err := db.NewInsert().Model(&publicationbuilder.BuildRecord{
+		ID: "build-exhausted", WorkspaceID: "workspace-1", CreatedByID: "user-1", State: publicationbuilder.BuildStateQueued, Phase: publicationbuilder.BuildPhaseQueued,
+		Revision: 1, IdempotencyKey: "exhausted", RequestFingerprint: "fingerprint", AuthorityJSON: "{}", RequestJSON: "{}", VoiceSnapshotJSON: "{}", ResultJSON: "{}", UsageJSON: "{}", CreatedAt: now, UpdatedAt: now,
+	}).Exec(t.Context())
+	require.NoError(t, err)
+	recorder := &telemetry.MemoryRecorder{}
+	builder, err := publicationbuilder.NewApplication(db, terminalBuildStub{}, publicationbuilder.ApplicationConfig{Telemetry: recorder})
+	require.NoError(t, err)
+	worker := NewWorker(db, "worker", time.Second, nil, nil, stubStorage{})
+	worker.SetPublicationBuilderService(builder)
+	job := &models.Job{ID: "exhausted", Type: jobregistry.TypePublicationBuild, Payload: `{"build_id":"build-exhausted"}`, RunAt: now}
+	finishTerminalJob(t, db, worker, job, errors.New("infrastructure failure"))
+	worker.finishFailedJob(t.Context(), job, errors.New("stale worker retry"))
+	var stored publicationbuilder.BuildRecord
+	require.NoError(t, db.NewSelect().Model(&stored).Where("id = ?", "build-exhausted").Scan(t.Context()))
+	require.Equal(t, publicationbuilder.BuildStateFailed, stored.State)
+	require.Len(t, recorder.Events, 1)
+	require.Equal(t, telemetry.EventPublicationBuildFailed, recorder.Events[0].Name)
+	require.Equal(t, "job_failed", recorder.Events[0].Properties["error_code"])
+}
+
+func TestPendingProviderWriteContinuesBeyondOrdinaryAttemptLimit(t *testing.T) {
+	db := createTestDB(t)
+	defer db.Close()
+	worker := NewWorker(db, "review-worker", time.Second, nil, nil, stubStorage{})
+	now := time.Now().UTC()
+	job := &models.Job{ID: "pending-review", Type: jobregistry.TypeEngagementAction, Status: jobStatusProcessing, LockedBy: worker.workerID, LockedAt: now, Attempts: 1, MaxAttempts: 1, RunAt: now}
+	_, err := db.NewInsert().Model(job).Exec(t.Context())
+	require.NoError(t, err)
+	pending := &providerwrite.OutcomeError{Kind: string(platform.PublishSubmissionPending), RetryAfter: time.Minute, Err: providerwrite.ErrOutcomePending}
+	worker.finishFailedJob(t.Context(), job, pending)
+	require.NoError(t, db.NewSelect().Model(job).WherePK().Scan(t.Context()))
+	require.Equal(t, jobStatusPending, job.Status)
+	require.LessOrEqual(t, job.Attempts, 1)
+	require.True(t, job.RunAt.After(now.Add(50*time.Second)))
+}
+
+type reviewRecoveryGate struct{}
+
+func (reviewRecoveryGate) IsEffectiveEnabled(context.Context, string, string) (bool, error) {
+	return true, nil
+}
+func TestReviewReplyCrashRecoveryKeepsItsDurableIntent(t *testing.T) {
+	db, err := database.InitDBWithDriver("sqlite", "file:review-recovery-"+t.Name()+"?mode=memory&cache=shared")
+	require.NoError(t, err)
+	defer db.Close()
+	require.NoError(t, database.CreateSchema(db))
+	for _, row := range []any{
+		&models.User{ID: "u", Email: "review-recovery@example.test"},
+		&models.Organization{ID: "o", Name: "Org", CreatedByID: "u"},
+		&models.Workspace{ID: "w", Name: "Workspace", OrganizationID: "o"},
+		&models.WorkspaceMember{WorkspaceID: "w", UserID: "u", Role: models.WorkspaceRoleAdmin, Status: models.WorkspaceMemberStatusActive},
+		&models.SocialAccount{ID: "a", WorkspaceID: "w", Slug: "reviews", Platform: "googlebusiness", AccountID: "accounts/1/locations/2", AccessTokenEnc: []byte("synthetic"), IsActive: true},
+		&models.EngagementItem{ID: "review", WorkspaceID: "w", SocialAccountID: "a", Platform: "googlebusiness", RemoteID: "accounts/1/locations/2/reviews/3", Kind: "review", CanReply: true, SubjectJSON: `{"kind":"review","remote_id":"accounts/1/locations/2/reviews/3","review":{"anonymous":true}}`, LastSeenAt: time.Now().UTC()},
+	} {
+		_, err = db.NewInsert().Model(row).Exec(t.Context())
+		require.NoError(t, err)
+	}
+	service := engagement.NewService(db, nil, nil)
+	service.SetFeatureGate(reviewRecoveryGate{})
+	id, err := service.QueueEngagementActionReceipt(t.Context(), engagement.Actor{UserID: "u"}, "review", "reply", "Thanks", "crash")
+	require.NoError(t, err)
+	_, err = db.NewUpdate().Model((*models.Job)(nil)).Set("status='processing'").Set("attempts=1").Set("locked_by='old-worker'").Set("locked_at=?", time.Now().UTC().Add(-time.Hour)).Where("id=?", id).Exec(t.Context())
+	require.NoError(t, err)
+	worker := NewWorker(db, "new-worker", time.Second, nil, nil, stubStorage{})
+	worker.requeueStaleProcessingJobs(t.Context())
+	var job models.Job
+	require.NoError(t, db.NewSelect().Model(&job).Where("id=?", id).Scan(t.Context()))
+	require.Equal(t, jobStatusPending, job.Status, "a review intent must resume through its write fence after a worker crash")
+	require.Contains(t, job.Payload, "Thanks")
+}

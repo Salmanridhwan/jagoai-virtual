@@ -1,0 +1,54 @@
+{
+	"name": "@openpost/editor-shared",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": {
+			"types": "./src/index.ts",
+			"default": "./src/index.ts"
+		},
+		"./audio": {
+			"types": "./src/audio/index.ts",
+			"default": "./src/audio/index.ts"
+		},
+		"./media": {
+			"types": "./src/media/index.ts",
+			"default": "./src/media/index.ts"
+		},
+		"./transcript": {
+			"types": "./src/transcript/index.ts",
+			"default": "./src/transcript/index.ts"
+		},
+		"./settings": {
+			"types": "./src/settings/index.ts",
+			"default": "./src/settings/index.ts"
+		},
+		"./workspace": {
+			"types": "./src/workspace-fs/index.ts",
+			"default": "./src/workspace-fs/index.ts"
+		},
+		"./project-bundle": {
+			"types": "./src/project-bundle/index.ts",
+			"default": "./src/project-bundle/index.ts"
+		},
+		"./media/processing/ort-runtime": {
+			"types": "./src/media/processing/ort-runtime.ts",
+			"default": "./src/media/processing/ort-runtime.ts"
+		}
+	},
+	"scripts": {
+		"check": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@mediabunny/ac3": "1.54.0",
+		"@noble/hashes": "1.8.0",
+		"@ricky0123/vad-web": "0.0.31",
+		"mediabunny": "1.54.0",
+		"onnxruntime-web": "1.26.0-dev.20260410-5e55544225",
+		"zod": "^4.6.7"
+	},
+	"devDependencies": {
+		"typescript": "5.9.3",
+		"vite": "^8.2.4"
+	}
+}

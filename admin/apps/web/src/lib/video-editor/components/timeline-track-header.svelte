@@ -1,0 +1,429 @@
+<script lang="ts">
+	import { tick } from 'svelte';
+	import {
+		MIN_TRACK_HEIGHT,
+		MAX_TRACK_HEIGHT,
+		formatTrackHeightText
+	} from '../timeline/track-resize';
+	import { Portal } from 'bits-ui';
+	import { m } from '$lib/paraglide/messages';
+	import { Button } from '$lib/components/ui/button';
+	import { Input } from '$lib/components/ui/input';
+	import { ThemeIcon, ProtectedIcon } from '$lib/themes/icons';
+	import type { TimelineTrack } from '$lib/video-editor/project/types';
+	import {
+		eventMatchesShortcut,
+		formatShortcutAriaKey
+	} from '$lib/video-editor/settings/keyboard-shortcuts';
+	import { keyboardShortcuts } from '$lib/video-editor/settings/keyboard-shortcuts.svelte';
+
+	let {
+		track,
+		effectiveTrack = track,
+		itemCount,
+		canDelete,
+		selected = false,
+		child = false,
+		inheritedLocked = false,
+		inheritedVisible = false,
+		inheritedMuted = false,
+		inheritedSolo = false,
+		onselect = () => {},
+		oncollapse = () => {},
+		onungroup = () => {},
+		ondeletegroup = () => {},
+		onmoveup = () => {},
+		onmovedown = () => {},
+		onrename = () => {},
+		onreorderpointerdown,
+		onheightpointerdown,
+		onheightkeydown,
+		onheightreset,
+		onvisibility,
+		onmute,
+		onsolo,
+		onlock,
+		onsynclock,
+		ondelete
+	}: {
+		track: TimelineTrack;
+		effectiveTrack?: TimelineTrack;
+		itemCount: number;
+		canDelete: boolean;
+		selected?: boolean;
+		child?: boolean;
+		inheritedLocked?: boolean;
+		inheritedVisible?: boolean;
+		inheritedMuted?: boolean;
+		inheritedSolo?: boolean;
+		onselect?: (event: MouseEvent) => void;
+		oncollapse?: () => void;
+		onungroup?: () => void;
+		ondeletegroup?: () => void;
+		onmoveup?: () => void;
+		onmovedown?: () => void;
+		onrename?: (name: string) => void;
+		onreorderpointerdown?: (event: PointerEvent) => void;
+		onheightpointerdown?: (event: PointerEvent) => void;
+		onheightkeydown?: (event: KeyboardEvent) => void;
+		onheightreset?: (event: MouseEvent) => void;
+		onvisibility: () => void;
+		onmute: () => void;
+		onsolo: () => void;
+		onlock: () => void;
+		onsynclock: () => void;
+		ondelete: () => void;
+	} = $props();
+
+	const controlClass =
+		'h-6 w-0 overflow-hidden rounded data-[active=true]:w-6 text-[var(--video-editor-muted)] opacity-0 transition-opacity group-focus-within/header:w-6 group-hover/header:w-6 [@media(pointer:coarse)]:w-6 hover:bg-[var(--video-editor-control-hover)] hover:text-[var(--video-editor-text)] hover:opacity-100 focus-visible:opacity-100 group-focus-within/header:opacity-100 group-hover/header:opacity-100 data-[active=true]:bg-[var(--video-editor-selection)] data-[active=true]:text-[var(--video-editor-selection-text)] data-[active=true]:opacity-100 [@media(pointer:coarse)]:opacity-100';
+	const menuItemClass =
+		'flex h-10 w-full items-center justify-start gap-2 rounded px-2.5 text-left text-sm hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-[oklch(0.66_0.14_45)] focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 data-[active=true]:bg-muted';
+	let editingName = $state(false);
+	let nameDraft = $state('');
+	let nameInput = $state<HTMLInputElement | null>(null);
+	let moreOpen = $state(false);
+	let moreMenu = $state<HTMLDivElement | null>(null);
+	let moreButton = $state<HTMLButtonElement | null>(null);
+	let moreMenuContent = $state<HTMLDivElement | null>(null);
+	let moreMenuLeft = $state(0);
+	let moreMenuTop = $state(0);
+	const nameAriaKeyShortcuts = $derived(
+		[
+			keyboardShortcuts.bindings.TRACK_RENAME,
+			keyboardShortcuts.bindings.TRACK_MOVE_UP,
+			keyboardShortcuts.bindings.TRACK_MOVE_DOWN
+		]
+			.filter(Boolean)
+			.map((binding) => formatShortcutAriaKey(binding))
+			.join(' ')
+	);
+
+	function runMoreAction(action: () => void): void {
+		moreOpen = false;
+		action();
+	}
+
+	function closeMoreOnOutsideClick(event: MouseEvent): void {
+		const path = event.composedPath();
+		if (moreOpen && !path.includes(moreMenu!) && !path.includes(moreMenuContent!)) moreOpen = false;
+	}
+
+	async function toggleMore(): Promise<void> {
+		if (moreOpen) {
+			moreOpen = false;
+			return;
+		}
+		const triggerRect = moreButton?.getBoundingClientRect();
+		if (!triggerRect) return;
+		moreMenuLeft = Math.min(triggerRect.right + 4, Math.max(8, window.innerWidth - 232));
+		moreMenuTop = Math.max(8, triggerRect.top);
+		moreOpen = true;
+		await tick();
+		const menuRect = moreMenuContent?.getBoundingClientRect();
+		if (menuRect)
+			moreMenuTop = Math.min(moreMenuTop, Math.max(8, window.innerHeight - menuRect.height - 8));
+	}
+
+	function closeMoreOnEscape(event: KeyboardEvent): void {
+		if (moreOpen && event.key === 'Escape') {
+			event.preventDefault();
+			moreOpen = false;
+		}
+	}
+
+	async function startRename(): Promise<void> {
+		nameDraft = track.name;
+		editingName = true;
+		await tick();
+		nameInput?.focus();
+		nameInput?.select();
+	}
+
+	function finishRename(commit: boolean): void {
+		if (!editingName) return;
+		editingName = false;
+		if (commit && nameDraft.trim() && nameDraft.trim() !== track.name) onrename(nameDraft.trim());
+	}
+
+	async function nameKeydown(event: KeyboardEvent): Promise<void> {
+		const bindings = keyboardShortcuts.bindings;
+		const target = event.currentTarget;
+		if (eventMatchesShortcut(event, bindings.TRACK_RENAME)) {
+			event.preventDefault();
+			void startRename();
+		} else if (eventMatchesShortcut(event, bindings.TRACK_MOVE_UP)) {
+			event.preventDefault();
+			onmoveup();
+		} else if (eventMatchesShortcut(event, bindings.TRACK_MOVE_DOWN)) {
+			event.preventDefault();
+			onmovedown();
+		} else {
+			return;
+		}
+		if (editingName) return;
+		await tick();
+		if (target instanceof HTMLElement && target.isConnected) target.focus();
+	}
+</script>
+
+<svelte:window
+	onclick={closeMoreOnOutsideClick}
+	onkeydown={closeMoreOnEscape}
+	onresize={() => (moreOpen = false)}
+	onscroll={() => (moreOpen = false)}
+/>
+
+<div
+	class="group/header flex size-full min-w-0 flex-row items-center gap-1 border-r border-[var(--video-editor-border)] bg-[var(--video-editor-panel)] px-1.5"
+	class:ring-1={selected}
+	class:ring-inset={selected}
+	class:ring-[oklch(0.66_0.14_45)]={selected}
+	data-track-header={track.id}
+>
+	<div
+		class="flex min-w-0 flex-1 items-center gap-1 [@media(pointer:coarse)]:min-h-11 {child
+			? 'pl-3'
+			: ''}"
+	>
+		{#if track.isGroup}
+			<Button
+				variant="ghost"
+				size="icon"
+				class="size-5 rounded"
+				data-track-primary-control
+				aria-label={track.isCollapsed
+					? m.video_editor_track_group_expand()
+					: m.video_editor_track_group_collapse()}
+				title={track.isCollapsed
+					? m.video_editor_track_group_expand()
+					: m.video_editor_track_group_collapse()}
+				onclick={oncollapse}
+			>
+				{#if track.isCollapsed}<ThemeIcon role="chevron-right" class="size-3.5" />{:else}<ThemeIcon
+						role="chevron-down"
+						class="size-3.5"
+					/>{/if}
+			</Button>
+			<ThemeIcon role="folder" class="size-3.5 shrink-0 text-[var(--video-editor-focus)]" />
+		{/if}
+		{#if editingName}
+			<Input
+				bind:ref={nameInput}
+				bind:value={nameDraft}
+				class="h-5 min-w-0 flex-1 rounded border border-[var(--video-editor-focus-border)] bg-[var(--video-editor-field)] px-1 text-[11px] text-[var(--video-editor-field-text)] shadow-none focus-visible:ring-0"
+				aria-label={m.video_editor_track_rename()}
+				onblur={() => finishRename(true)}
+				onkeydown={(event) => {
+					if (event.key === 'Enter') finishRename(true);
+					else if (event.key === 'Escape') finishRename(false);
+				}}
+			/>
+		{:else}
+			<button
+				type="button"
+				class="flex min-w-0 flex-1 cursor-grab touch-none items-center gap-1 rounded-sm text-left text-[11px] font-medium text-[var(--video-editor-text)] focus-visible:outline-2 focus-visible:outline-[var(--video-editor-focus)] active:cursor-grabbing [@media(pointer:coarse)]:min-h-11"
+				aria-pressed={selected}
+				aria-keyshortcuts={nameAriaKeyShortcuts || undefined}
+				data-track-primary-control
+				title={`${m.compose_drag_to_reorder()}. ${m.video_editor_track_name_hint({ name: track.name })}`}
+				onclick={onselect}
+				onpointerdown={onreorderpointerdown}
+				ondblclick={startRename}
+				onkeydown={nameKeydown}
+				><ThemeIcon role="drag" class="size-3 shrink-0 text-[var(--video-editor-muted)]" /><span
+					class="truncate">{track.name}</span
+				></button
+			>
+		{/if}
+		<span class="shrink-0 font-mono text-[9px] text-[var(--video-editor-muted)]">
+			{itemCount}
+		</span>
+	</div>
+	<div class="relative flex shrink-0 flex-nowrap items-center gap-0.5">
+		<Button
+			variant="ghost"
+			size="icon"
+			class={controlClass}
+			data-track-primary-control
+			data-active={!effectiveTrack.visible}
+			disabled={inheritedVisible}
+			aria-label={effectiveTrack.visible
+				? m.video_editor_track_hide()
+				: m.video_editor_track_show()}
+			title={inheritedVisible
+				? m.video_editor_track_group_visibility_inherited()
+				: effectiveTrack.visible
+					? m.video_editor_track_hide()
+					: m.video_editor_track_show()}
+			onclick={onvisibility}
+		>
+			{#if effectiveTrack.visible}<ThemeIcon role="eye" class="size-3.5" />{:else}<ThemeIcon
+					role="eye-off"
+					class="size-3.5"
+				/>{/if}
+		</Button>
+		<Button
+			variant="ghost"
+			size="icon"
+			class={controlClass}
+			data-track-primary-control
+			data-active={effectiveTrack.locked}
+			disabled={inheritedLocked}
+			aria-label={effectiveTrack.locked
+				? m.video_editor_track_unlock()
+				: m.video_editor_track_lock()}
+			title={inheritedLocked
+				? m.video_editor_track_group_lock_inherited()
+				: effectiveTrack.locked
+					? m.video_editor_track_unlock()
+					: m.video_editor_track_lock()}
+			onclick={onlock}
+		>
+			{#if effectiveTrack.locked}<ThemeIcon role="lock" class="size-3.5" />{:else}<ThemeIcon
+					role="lock"
+					class="size-3.5"
+				/>{/if}
+		</Button>
+		<!-- The collapsed menu control must not intercept clips beyond the track header. -->
+		<div
+			bind:this={moreMenu}
+			class={[
+				'relative h-6 shrink-0 overflow-hidden group-focus-within/header:w-6 group-focus-within/header:overflow-visible group-hover/header:w-6 group-hover/header:overflow-visible [@media(pointer:coarse)]:w-6 [@media(pointer:coarse)]:overflow-visible',
+				selected || moreOpen ? 'w-6' : 'w-0'
+			]}
+		>
+			<button
+				bind:this={moreButton}
+				type="button"
+				class="flex size-6 shrink-0 cursor-pointer list-none items-center justify-center rounded text-[var(--video-editor-muted)] opacity-0 transition-opacity group-focus-within/header:opacity-100 group-hover/header:opacity-100 hover:bg-[var(--video-editor-control-hover)] hover:text-[var(--video-editor-text)] hover:opacity-100 focus-visible:opacity-100 aria-expanded:opacity-100 [&::-webkit-details-marker]:hidden [@media(pointer:coarse)]:opacity-100"
+				class:opacity-100={selected}
+				data-track-primary-control
+				aria-expanded={moreOpen}
+				aria-haspopup="menu"
+				aria-label={m.video_editor_track_more_actions()}
+				title={m.video_editor_track_more_actions()}
+				onclick={toggleMore}
+			>
+				<ThemeIcon role="more-horizontal" class="size-3.5" />
+			</button>
+			{#if moreOpen}
+				<Portal>
+					<div
+						bind:this={moreMenuContent}
+						class="video-editor-theme fixed z-[100] min-w-56 space-y-1 rounded-md border border-border bg-popover p-1.5 text-popover-foreground shadow-md"
+						style={`left:${moreMenuLeft}px;top:${moreMenuTop}px`}
+					>
+						<div role="menu">
+							<button
+								type="button"
+								role="menuitem"
+								class="{menuItemClass} hidden min-h-11 [@media(pointer:coarse)]:flex"
+								disabled={inheritedVisible}
+								onclick={() => runMoreAction(onvisibility)}
+							>
+								<ThemeIcon role="eye" class="size-4" />
+								{effectiveTrack.visible ? m.video_editor_track_hide() : m.video_editor_track_show()}
+							</button>
+							<button
+								type="button"
+								role="menuitem"
+								class="{menuItemClass} hidden min-h-11 [@media(pointer:coarse)]:flex"
+								disabled={inheritedLocked}
+								onclick={() => runMoreAction(onlock)}
+							>
+								<ThemeIcon role="lock" class="size-4" />
+								{effectiveTrack.locked
+									? m.video_editor_track_unlock()
+									: m.video_editor_track_lock()}
+							</button>
+							<button
+								type="button"
+								role="menuitem"
+								class={menuItemClass}
+								data-active={effectiveTrack.muted}
+								disabled={inheritedMuted}
+								title={inheritedMuted ? m.video_editor_track_group_mute_inherited() : undefined}
+								onclick={() => runMoreAction(onmute)}
+							>
+								{#if effectiveTrack.muted}<ThemeIcon role="audio" class="size-4" />{:else}<ThemeIcon
+										role="audio"
+										class="size-4"
+									/>{/if}
+								{effectiveTrack.muted ? m.video_editor_track_unmute() : m.video_editor_track_mute()}
+							</button>
+							<button
+								type="button"
+								role="menuitem"
+								class={menuItemClass}
+								data-active={effectiveTrack.solo}
+								disabled={inheritedSolo}
+								title={inheritedSolo ? m.video_editor_track_group_solo_inherited() : undefined}
+								onclick={() => runMoreAction(onsolo)}
+							>
+								<ProtectedIcon icon="editor-solo" class="size-4" />
+								{effectiveTrack.solo ? m.video_editor_track_unsolo() : m.video_editor_track_solo()}
+							</button>
+							{#if !track.isGroup}
+								<button
+									type="button"
+									role="menuitem"
+									class={menuItemClass}
+									data-active={track.syncLock !== false}
+									onclick={() => runMoreAction(onsynclock)}
+								>
+									<ThemeIcon role="link" class="size-4" />
+									{track.syncLock !== false
+										? m.video_editor_track_sync_unlock()
+										: m.video_editor_track_sync_lock()}
+								</button>
+							{:else}
+								<button
+									type="button"
+									role="menuitem"
+									class={menuItemClass}
+									onclick={() => runMoreAction(onungroup)}
+								>
+									<ProtectedIcon icon="editor-ungroup" class="size-4" />
+									{m.video_editor_track_group_ungroup_hint()}
+								</button>
+							{/if}
+							<button
+								type="button"
+								role="menuitem"
+								class="{menuItemClass} text-red-300 hover:bg-red-500/15 hover:text-red-200"
+								disabled={!canDelete}
+								title={canDelete ? undefined : m.video_editor_track_keep_one()}
+								onclick={() => runMoreAction(track.isGroup ? ondeletegroup : ondelete)}
+							>
+								<ThemeIcon role="delete" class="size-4" />
+								{track.isGroup
+									? m.video_editor_track_group_delete()
+									: m.video_editor_track_delete()}
+							</button>
+						</div>
+						{#if !track.isGroup}
+							<div
+								role="slider"
+								tabindex="0"
+								aria-orientation="vertical"
+								aria-label={m.video_editor_track_resize({ name: track.name })}
+								aria-valuemin={MIN_TRACK_HEIGHT}
+								aria-valuemax={MAX_TRACK_HEIGHT}
+								aria-valuenow={track.height}
+								aria-valuetext={formatTrackHeightText(track.height)}
+								class="{menuItemClass} hidden min-h-11 cursor-ns-resize touch-none [@media(pointer:coarse)]:flex"
+								title={m.video_editor_track_resize_hint()}
+								onpointerdown={onheightpointerdown}
+								onkeydown={onheightkeydown}
+								ondblclick={onheightreset}
+							>
+								{m.video_editor_track_resize({ name: track.name })}
+							</div>
+						{/if}
+					</div>
+				</Portal>
+			{/if}
+		</div>
+	</div>
+</div>

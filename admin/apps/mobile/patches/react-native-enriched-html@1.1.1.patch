@@ -1,0 +1,132 @@
+diff --git a/android/src/main/java/com/swmansion/enriched/common/parser/EnrichedParser.java b/android/src/main/java/com/swmansion/enriched/common/parser/EnrichedParser.java
+index 53d761c3857d28410237c8aff3fa73359f290393..85fcf24c34a0b1c84b909a24a62310dac843ed66 100644
+--- a/android/src/main/java/com/swmansion/enriched/common/parser/EnrichedParser.java
++++ b/android/src/main/java/com/swmansion/enriched/common/parser/EnrichedParser.java
+@@ -109,6 +109,11 @@ public class EnrichedParser {
+   }
+ 
+   /** Returns an HTML escaped representation of the given plain text. */
++  private static String escapeMentionAttribute(String text) {
++    return text.replace("&", "&amp;").replace("\"", "&#34;")
++        .replace("<", "&lt;").replace(">", "&gt;");
++  }
++
+   public static String escapeHtml(CharSequence text) {
+     StringBuilder out = new StringBuilder();
+     withinStyle(out, text, 0, text.length());
+@@ -311,7 +316,7 @@ public class EnrichedParser {
+         }
+         if (style[j] instanceof EnrichedMentionSpan) {
+           out.append("<mention text=\"");
+-          out.append(((EnrichedMentionSpan) style[j]).getText());
++          out.append(escapeMentionAttribute(((EnrichedMentionSpan) style[j]).getText()));
+           out.append("\"");
+ 
+           out.append(" indicator=\"");
+@@ -323,7 +328,7 @@ public class EnrichedParser {
+             out.append(" ");
+             out.append(entry.getKey());
+             out.append("=\"");
+-            out.append(entry.getValue());
++            out.append(escapeMentionAttribute(entry.getValue()));
+             out.append("\"");
+           }
+ 
+diff --git a/ios/EnrichedTextInputView.mm b/ios/EnrichedTextInputView.mm
+index a899aa6296e2308bc63cf542fdaa48cb5844a52f..5925bfb3027681d987e3fb9fd053ccb1a2d20130 100644
+--- a/ios/EnrichedTextInputView.mm
++++ b/ios/EnrichedTextInputView.mm
+@@ -111,6 +111,15 @@ Class<RCTComponentViewProtocol> EnrichedTextInputViewCls(void) {
+   return defaultTypingAttributes;
+ }
+ 
++// Forward accessibility props to the editable view, matching React TextInput.
++- (NSObject *)accessibilityElement {
++  return textView;
++}
++
++- (BOOL)isAccessibilityElement {
++  return NO;
++}
++
+ // MARK: - Init
+ 
+ - (instancetype)initWithFrame:(CGRect)frame {
+diff --git a/ios/enrichedInputTextView/EnrichedInputTextView.mm b/ios/enrichedInputTextView/EnrichedInputTextView.mm
+index 4e8dd50ba0659a88592560b3f7af3d405a61cc48..3980b6a71d7063b7927c2736284266995a47741e 100644
+--- a/ios/enrichedInputTextView/EnrichedInputTextView.mm
++++ b/ios/enrichedInputTextView/EnrichedInputTextView.mm
+@@ -9,6 +9,12 @@
+ 
+ @implementation EnrichedInputTextView
+ 
++// UITextView exposes editable accessibility elements internally. Making the
++// container itself accessible hides those elements, including its value.
++- (void)setIsAccessibilityElement:(BOOL)isAccessibilityElement {
++}
++
++
+ - (void)layoutSubviews {
+   [super layoutSubviews];
+   // UITextView resets contentSize during its own layout pass (triggered when
+diff --git a/ios/extensions/StringExtension.mm b/ios/extensions/StringExtension.mm
+index 6f0a9d5af0630ba4b24dd3b01ab31d41326dda80..a7946be04eb64f0b3241a8543cfae85096d1e1e2 100644
+--- a/ios/extensions/StringExtension.mm
++++ b/ios/extensions/StringExtension.mm
+@@ -12,17 +12,13 @@
+ 
+ + (NSString *)stringByEscapingHtml:(NSString *)html {
+   NSMutableString *escaped = [html mutableCopy];
+-  NSDictionary *escapeMap = @{
+-    @"&" : @"&amp;",
+-    @"<" : @"&lt;",
+-    @">" : @"&gt;",
+-  };
+-
+-  for (NSString *key in escapeMap) {
+-    [escaped replaceOccurrencesOfString:key
+-                             withString:escapeMap[key]
+-                                options:NSLiteralSearch
+-                                  range:NSMakeRange(0, escaped.length)];
++  // Ampersands must be escaped first, before replacement text adds entities.
++  NSArray<NSArray<NSString *> *> *replacements = @[
++    @[@"&", @"&amp;"], @[@"<", @"&lt;"], @[@">", @"&gt;"]
++  ];
++  for (NSArray<NSString *> *pair in replacements) {
++    [escaped replaceOccurrencesOfString:pair[0] withString:pair[1]
++                               options:NSLiteralSearch range:NSMakeRange(0, escaped.length)];
+   }
+   return escaped;
+ }
+diff --git a/ios/htmlParser/HtmlParser.mm b/ios/htmlParser/HtmlParser.mm
+index 0ed3d879a4560ac5ea70f5013ad8153a2d0569f8..959eeca3711c7515442bf56c7c9344374e8b22a2 100644
+--- a/ios/htmlParser/HtmlParser.mm
++++ b/ios/htmlParser/HtmlParser.mm
+@@ -793,7 +793,10 @@
+                            }];
+ 
+       MentionParams *mentionParams = [[MentionParams alloc] init];
+-      mentionParams.text = paramsDict[@"text"];
++      // The visible decoded text is authoritative, including quotes and entities.
++      NSRange mentionRange = tagRangeValue.rangeValue;
++      mentionParams.text = [plainText substringWithRange:NSMakeRange(
++          mentionRange.location - secondPassImageCount, mentionRange.length)];
+       mentionParams.indicator = paramsDict[@"indicator"];
+ 
+       [paramsDict removeObjectsForKeys:@[ @"text", @"indicator" ]];
+@@ -1396,12 +1399,13 @@
+               [attrsStr
+                   appendString:[NSString stringWithFormat:@" %@=\"%@\"",
+                                                           (NSString *)key,
+-                                                          (NSString *)obj]];
++                                                          [[NSString stringByEscapingHtml:(NSString *)obj]
++                          stringByReplacingOccurrencesOfString:@"\"" withString:@"&#34;"]]];
+             }];
+           }
+           return [NSString
+               stringWithFormat:@"mention text=\"%@\" indicator=\"%@\"%@",
+-                               params.text, params.indicator, attrsStr];
++                               [[NSString stringByEscapingHtml:params.text] stringByReplacingOccurrencesOfString:@"\"" withString:@"&#34;"], params.indicator, attrsStr];
+         }
+       }
+       return @"mention";

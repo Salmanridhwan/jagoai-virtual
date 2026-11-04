@@ -1,0 +1,311 @@
+<script lang="ts">
+	import ColorPicker from '$lib/components/color-picker.svelte';
+	import AppSelect from '$lib/components/app-select.svelte';
+	import ImageEditorFontPicker from '$lib/components/editor-font-picker.svelte';
+	import { Button } from '$lib/components/ui/button';
+	import { Input } from '$lib/components/ui/input';
+	import { Textarea } from '$lib/components/ui/textarea';
+	import { m } from '$lib/paraglide/messages';
+	import type { Snippet } from 'svelte';
+	import { hasRegisteredImageEditorTextFont } from '../fonts';
+	import { useImageEditor } from '../editor.svelte';
+	import { textGraphemeOffset, textRunStyleAt, type ImageEditorTextEdit } from '../text-runs';
+	import { ProtectedIcon, type ProtectedIconRole } from '$lib/themes/icons';
+
+	const editor = useImageEditor();
+	const textScopeID = $props.id();
+	let { children }: { children?: Snippet } = $props();
+	let layer = $derived(editor.selectedLayers[0] ?? null);
+	let layerLocked = $derived(layer ? editor.isLayerLocked(layer.id) : false);
+	let textRange = $derived(
+		editor.textRange?.pageID === editor.activePageID && editor.textRange.layerID === layer?.id
+			? editor.textRange
+			: null
+	);
+	let selectedStyle = $derived(
+		layer?.text && textRange ? textRunStyleAt(layer.text, textRange.start) : null
+	);
+	let brandColors = $derived(editor.brandKit?.colors ?? []);
+	let brandFonts = $derived(editor.brandKit?.fonts ?? []);
+	let brandTextStyles = $derived(editor.brandKit?.text_styles ?? []);
+	let missingFontAsset = $derived(
+		layer?.text?.font_asset_id &&
+			!brandFonts.some((font) => font.media_id === layer?.text?.font_asset_id) &&
+			!hasRegisteredImageEditorTextFont(layer.text)
+			? layer.text.font_asset_id
+			: ''
+	);
+	let applicationFeedback = $state('');
+	let pendingTextEdit: ImageEditorTextEdit | undefined;
+	let compositionStart: number | null = null;
+	let compositionEnd: number | null = null;
+	let fontWeightOptions = $derived.by(() => {
+		const options = [
+			[100, m.image_editor_thin()],
+			[200, m.image_editor_extra_light()],
+			[300, m.image_editor_light()],
+			[400, m.image_editor_regular()],
+			[500, m.image_editor_medium()],
+			[600, m.image_editor_semibold()],
+			[700, m.image_editor_bold()],
+			[800, m.image_editor_extra_bold()],
+			[900, m.image_editor_black()]
+		].map(([weight, label]) => ({
+			value: String(weight),
+			label: `${weight} · ${label}`
+		}));
+		const selectedWeight = selectedStyle?.font_weight ?? layer?.text?.font_weight;
+		if (
+			Number.isFinite(selectedWeight) &&
+			selectedWeight! >= 1 &&
+			selectedWeight! <= 1000 &&
+			!options.some((option) => option.value === String(selectedWeight))
+		) {
+			options.push({
+				value: String(selectedWeight),
+				label: String(selectedWeight)
+			});
+			options.sort((left, right) => Number(left.value) - Number(right.value));
+		}
+		return options;
+	});
+
+	function alignmentLabel(alignment: string): string {
+		if (alignment === 'left') return m.image_editor_align_left();
+		if (alignment === 'center') return m.image_editor_align_center();
+		return m.image_editor_align_right();
+	}
+
+	function numberValue(event: Event, fallback: number): number {
+		const value =
+			event.currentTarget instanceof HTMLInputElement
+				? Number(event.currentTarget.value)
+				: Number.NaN;
+		return Number.isFinite(value) ? value : fallback;
+	}
+
+	function applyTextStyle(styleID: string): void {
+		const style = brandTextStyles.find((candidate) => candidate.id === styleID);
+		if (!style) return;
+		const result = editor.applyBrandTextStyle(style);
+		applicationFeedback =
+			result.skippedLocked || result.skippedUnsupported
+				? m.image_editor_partial_application({
+						applied: result.applied,
+						locked: result.skippedLocked,
+						unsupported: result.skippedUnsupported
+					})
+				: m.image_editor_applied_to_layers({ count: result.applied });
+	}
+
+	function selectTextRange(target: HTMLTextAreaElement): void {
+		if (!layer?.text) return;
+		editor.setTextRange(
+			layer.id,
+			textGraphemeOffset(target.value, target.selectionStart),
+			textGraphemeOffset(target.value, target.selectionEnd)
+		);
+	}
+</script>
+
+{#if layer?.type === 'text' && layer.text}
+	<section class="space-y-2">
+		{#if brandTextStyles.length > 0}
+			<label class="grid gap-1 text-xs">
+				<span>{m.image_editor_text_styles()}</span>
+				<AppSelect
+					value=""
+					ariaLabel={m.image_editor_apply_text_style()}
+					disabled={!editor.canEdit || layerLocked}
+					onValueChange={applyTextStyle}
+					options={brandTextStyles.map((style) => ({
+						value: style.id,
+						label: style.name
+					}))}
+					placeholder={m.image_editor_choose_text_style()}
+					class="h-7 w-full"
+				/>
+			</label>
+		{/if}
+		{#if missingFontAsset}
+			<div class="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs" role="alert">
+				<p>{m.image_editor_missing_brand_font()}</p>
+				<Button
+					variant="outline"
+					size="xs"
+					class="mt-2"
+					disabled={!editor.canEdit || layerLocked}
+					onclick={() =>
+						editor.updateLayer(layer.id, {
+							text: {
+								...layer.text!,
+								font_family: 'Geist Variable',
+								font_asset_id: undefined
+							}
+						})}
+				>
+					{m.image_editor_use_fallback_font()}
+				</Button>
+			</div>
+		{/if}
+		<label class="grid gap-1 text-xs">
+			<span>{m.image_editor_text()}</span>
+			<Textarea
+				class="min-h-20"
+				value={layer.text.text}
+				disabled={!editor.canEdit || layerLocked}
+				onselect={(event) => selectTextRange(event.currentTarget)}
+				onselectionchange={(event) => {
+					if (document.activeElement === event.currentTarget) selectTextRange(event.currentTarget);
+				}}
+				oncompositionstart={(event) => {
+					compositionStart = textGraphemeOffset(
+						event.currentTarget.value,
+						event.currentTarget.selectionStart
+					);
+					compositionEnd = compositionStart;
+				}}
+				oncompositionend={() => {
+					compositionStart = null;
+					compositionEnd = null;
+				}}
+				onbeforeinput={(event) => {
+					const target = event.currentTarget;
+					const composing =
+						event.inputType === 'insertCompositionText' && compositionStart !== null;
+					pendingTextEdit = {
+						start: composing
+							? compositionStart!
+							: textGraphemeOffset(target.value, target.selectionStart),
+						end: composing
+							? compositionEnd!
+							: textGraphemeOffset(target.value, target.selectionEnd),
+						inputType: event.inputType,
+						previousText: target.value
+					};
+				}}
+				oninput={(event) => {
+					editor.updateTextContent(layer.id, event.currentTarget.value, pendingTextEdit);
+					if (compositionStart !== null)
+						compositionEnd = textGraphemeOffset(
+							event.currentTarget.value,
+							event.currentTarget.selectionEnd
+						);
+					pendingTextEdit = undefined;
+					selectTextRange(event.currentTarget);
+				}}
+			/>
+		</label>
+		{#if textRange}
+			<p class="text-xs text-muted-foreground" role="status">
+				{m.image_editor_selected_count({
+					count: textRange.end - textRange.start
+				})}
+			</p>
+			<p id={textScopeID} class="text-xs text-muted-foreground">
+				{m.image_editor_text_range_scope()}
+			</p>
+		{/if}
+		<label class="grid gap-1 text-xs">
+			<span>{m.image_editor_font_family()}</span>
+			<ImageEditorFontPicker
+				value={layer.text.font_family}
+				ariaDescribedby={textRange ? textScopeID : undefined}
+				disabled={!editor.canEdit || layerLocked}
+				{brandFonts}
+				onChange={(font) =>
+					editor.updateLayer(layer.id, {
+						text: {
+							...layer.text!,
+							font_family: font.family,
+							font_asset_id: font.assetID,
+							font_weight: font.weight ?? layer.text!.font_weight,
+							font_style: font.style ?? layer.text!.font_style
+						}
+					})}
+			/>
+		</label>
+		<div class="grid grid-cols-2 gap-2">
+			<label class="grid gap-1 text-xs">
+				<span>{m.image_editor_size()}</span>
+				<Input
+					type="number"
+					aria-describedby={textRange ? textScopeID : undefined}
+					min="1"
+					step="0.1"
+					value={layer.text.font_size === undefined
+						? undefined
+						: Math.round(layer.text.font_size * 10) / 10}
+					disabled={!editor.canEdit || layerLocked}
+					oninput={(event) =>
+						editor.updateLayer(
+							layer.id,
+							{
+								text: {
+									...layer.text!,
+									font_size: numberValue(event, layer.text!.font_size)
+								}
+							},
+							`font-size:${layer.id}`
+						)}
+				/>
+			</label>
+			<label class="grid gap-1 text-xs">
+				<span>{m.image_editor_weight()}</span>
+				<AppSelect
+					value={String(selectedStyle?.font_weight ?? layer.text.font_weight)}
+					ariaLabel={m.image_editor_weight()}
+					disabled={!editor.canEdit || layerLocked}
+					onValueChange={(value) => editor.updateTextStyle(layer.id, 'font_weight', Number(value))}
+					options={fontWeightOptions}
+					class="h-7 w-full"
+				/>
+			</label>
+		</div>
+		<label class="grid gap-1 text-xs">
+			<span>{m.image_editor_color()}</span>
+			<ColorPicker
+				label={m.image_editor_color()}
+				value={selectedStyle?.color ?? layer.text.color}
+				disabled={!editor.canEdit || layerLocked}
+				{brandColors}
+				recentColors={editor.recentColors}
+				onChange={(value) =>
+					editor.updateTextStyle(layer.id, 'color', value, `text-color:${layer.id}`)}
+				onCommit={(value) => editor.rememberColor(value)}
+			/>
+		</label>
+		<div
+			class="inline-flex w-fit items-center rounded-md border bg-background p-0.5"
+			role="group"
+			aria-label={m.image_editor_text_alignment()}
+		>
+			{#each [['left', 'editor-align-left'], ['center', 'editor-align-center-horizontal'], ['right', 'editor-align-right']] as [alignment, icon] (alignment)}
+				<Button
+					variant={layer.text.align === alignment ? 'secondary' : 'ghost'}
+					size="icon-xs"
+					class="size-6 rounded-sm"
+					aria-pressed={layer.text.align === alignment}
+					aria-label={alignmentLabel(alignment)}
+					title={alignmentLabel(alignment)}
+					disabled={!editor.canEdit || layerLocked}
+					onclick={() =>
+						editor.updateLayer(layer.id, {
+							text: {
+								...layer.text!,
+								align: alignment as 'left' | 'center' | 'right'
+							}
+						})}
+				>
+					<ProtectedIcon icon={icon as ProtectedIconRole} class="size-3.5" />
+				</Button>
+			{/each}
+		</div>
+		{@render children?.()}
+		{#if applicationFeedback}
+			<p class="rounded-md border bg-muted/40 px-2.5 py-2 text-xs" role="status">
+				{applicationFeedback}
+			</p>
+		{/if}
+	</section>
+{/if}

@@ -1,0 +1,1221 @@
+<script lang="ts">
+	import { imageEditorMixedValue, useImageEditor } from '../editor.svelte';
+	import { defaultImageAdjustments } from '../document';
+	import { defaultTextCurve } from '../effects';
+	import { Input } from '$lib/components/ui/input';
+	import { Button } from '$lib/components/ui/button';
+	import { SliderRow } from '$lib/components/editor-density';
+	import AppSelect from '$lib/components/app-select.svelte';
+	import * as Collapsible from '$lib/components/ui/collapsible';
+	import * as Tooltip from '$lib/components/ui/tooltip';
+	import ColorPicker from '$lib/components/color-picker.svelte';
+	import ImageColorWorkspace from './image-color-workspace.svelte';
+	import LayerEffectsPanel from './layer-effects-panel.svelte';
+	import LensEffectProperties from './lens-effect-properties.svelte';
+	import AnimationProperties from './animation-properties.svelte';
+	import PageBackgroundEditor from './page-background-editor.svelte';
+	import TextContentProperties from './text-content-properties.svelte';
+	import { textRunStyleAt } from '../text-runs';
+	import { ProtectedIcon, ThemeIcon } from '$lib/themes/icons';
+	import { m } from '$lib/paraglide/messages';
+	import {
+		EDITOR_COLOR_GRADE_PRESETS,
+		editorColorGradePresetLabel
+	} from '$lib/editor-color-grade/presets';
+	import type { ImageEditorImageAdjustments, ImageEditorTextCurveType } from '../types';
+
+	let {
+		onOpenMedia = () => undefined,
+		onOpenLayers,
+		onAIEdit,
+		colorWorkspace = false
+	}: {
+		onOpenMedia?: () => void;
+		onOpenLayers?: () => void;
+		onAIEdit?: () => void;
+		colorWorkspace?: boolean;
+	} = $props();
+
+	const editor = useImageEditor();
+	let layer = $derived(editor.selectedLayers[0] ?? null);
+	let layerLocked = $derived(layer ? editor.isLayerLocked(layer.id) : false);
+	let selectionLocked = $derived(
+		editor.selectedLayers.every((item) => editor.isLayerLocked(item.id))
+	);
+	let anySelectionLocked = $derived(
+		editor.selectedLayers.some((item) => editor.isLayerLocked(item.id))
+	);
+	let textRange = $derived(
+		editor.textRange?.pageID === editor.activePageID && editor.textRange.layerID === layer?.id
+			? editor.textRange
+			: null
+	);
+	let selectedTextStyle = $derived(
+		layer?.text && textRange ? textRunStyleAt(layer.text, textRange.start) : null
+	);
+	let cropOpen = $state(false);
+	let layerActionsOpen = $state(false);
+	let transformOpen = $state(false);
+	let adjustmentsOpen = $state(false);
+	let aspectLocked = $state(true);
+	let brandColors = $derived(editor.brandKit?.colors ?? []);
+	let selectedTransform = $derived(editor.selectedTransform);
+	let mixedOpacity = $derived(
+		imageEditorMixedValue(editor.selectedLayers.map((item) => item.opacity))
+	);
+	const imageAdjustmentKeys = [
+		'brightness',
+		'contrast',
+		'saturation',
+		'temperature',
+		'tint',
+		'vibrance',
+		'hue',
+		'exposure',
+		'highlights',
+		'shadows',
+		'blur'
+	] satisfies Array<Exclude<keyof ImageEditorImageAdjustments, 'wheels' | 'curves'>>;
+	let applicationFeedback = $state('');
+	let previousSelectionCount = 0;
+
+	$effect(() => {
+		const selectionCount = editor.selectedLayers.length;
+		if (selectionCount > 1 && previousSelectionCount <= 1) transformOpen = true;
+		previousSelectionCount = selectionCount;
+	});
+
+	function partialApplicationMessage(result: {
+		applied: number;
+		skippedLocked: number;
+		skippedUnsupported: number;
+	}): string {
+		if (result.skippedLocked || result.skippedUnsupported) {
+			return m.image_editor_partial_application({
+				applied: result.applied,
+				locked: result.skippedLocked,
+				unsupported: result.skippedUnsupported
+			});
+		}
+		return m.image_editor_applied_to_layers({ count: result.applied });
+	}
+
+	function numberValue(event: Event, fallback: number): number {
+		const value =
+			event.currentTarget instanceof HTMLInputElement
+				? Number(event.currentTarget.value)
+				: Number.NaN;
+		return Number.isFinite(value) ? value : fallback;
+	}
+
+	function align(axis: 'horizontal' | 'vertical'): void {
+		if (!layer || !editor.document) return;
+		editor.updateTransform(layer.id, {
+			...(axis === 'horizontal'
+				? { x: (editor.activePageDimensions.width - layer.transform.width) / 2 }
+				: { y: (editor.activePageDimensions.height - layer.transform.height) / 2 })
+		});
+	}
+
+	function updateNumericTransform(key: 'x' | 'y' | 'width' | 'height', event: Event): void {
+		if (!layer || !selectedTransform) return;
+		const value = numberValue(event, selectedTransform[key]);
+		if (editor.selectedLayers.length > 1) {
+			applicationFeedback = partialApplicationMessage(
+				editor.updateSelectedTransform(key, value, aspectLocked)
+			);
+			return;
+		}
+		if (key === 'x' || key === 'y' || !aspectLocked) {
+			editor.updateTransform(layer.id, {
+				[key]: key === 'x' || key === 'y' ? value : Math.max(1, value)
+			});
+			return;
+		}
+		const ratio = layer.transform.width / Math.max(1, layer.transform.height);
+		editor.updateTransform(
+			layer.id,
+			key === 'width'
+				? {
+						width: Math.max(1, value),
+						height: Math.max(1, value / Math.max(0.0001, ratio))
+					}
+				: { height: Math.max(1, value), width: Math.max(1, value * ratio) }
+		);
+	}
+
+	function updateSelectedTransform(
+		key: 'rotation' | 'flip_x' | 'flip_y',
+		value: number | boolean
+	): void {
+		if (!layer || !selectedTransform) return;
+		if (editor.selectedLayers.length > 1) {
+			applicationFeedback = partialApplicationMessage(editor.updateSelectedTransform(key, value));
+			return;
+		}
+		editor.updateTransform(layer.id, { [key]: value });
+	}
+
+	function updateSelectedOpacityPercent(percent: number): void {
+		const result = editor.updateSelectedOpacity(percent / 100);
+		applicationFeedback = partialApplicationMessage(result);
+	}
+
+	function updateCrop(key: 'x' | 'y' | 'width' | 'height', event: Event, fallback: number): void {
+		if (!layer?.image) return;
+		const value = numberValue(event, fallback * 100) / 100;
+		const crop = { ...layer.image.crop, [key]: value };
+		crop.width = Math.min(1, Math.max(0.01, crop.width));
+		crop.height = Math.min(1, Math.max(0.01, crop.height));
+		crop.x = Math.min(1 - crop.width, Math.max(0, crop.x));
+		crop.y = Math.min(1 - crop.height, Math.max(0, crop.y));
+		editor.updateLayer(layer.id, { image: { ...layer.image, crop } }, `image-crop:${layer.id}`);
+	}
+
+	function cropValue(key: 'x' | 'y' | 'width' | 'height'): number {
+		return layer?.image?.crop[key] ?? (key === 'width' || key === 'height' ? 1 : 0);
+	}
+
+	function setTextCurveType(type: ImageEditorTextCurveType): void {
+		if (!layer?.text || !editor.document || layerLocked) return;
+		editor.mutate('Change text curve', (document) => {
+			const current = document.pages
+				.find((page) => page.id === editor.activePageID)
+				?.layers.find((candidate) => candidate.id === layer?.id);
+			if (!current?.text) return;
+			const previousType = current.text.curve?.type ?? 'none';
+			current.text.curve = {
+				...(current.text.curve ?? defaultTextCurve()),
+				type
+			};
+			if (type !== 'circle' && type !== 'ellipse') return;
+			const nextHeight =
+				type === 'circle'
+					? current.transform.width
+					: previousType === 'circle'
+						? current.transform.width * 0.55
+						: Math.max(current.transform.height, current.transform.width * 0.55);
+			const centerY = current.transform.y + current.transform.height / 2;
+			current.transform.height = nextHeight;
+			current.transform.y = Math.max(
+				0,
+				Math.min(editor.activePageDimensions.height - nextHeight, centerY - nextHeight / 2)
+			);
+		});
+	}
+
+	function updateCurveStrength(percent: number): void {
+		const text = layer?.text;
+		const curve = text?.curve;
+		if (!layer || !text || !curve) return;
+		editor.updateLayer(
+			layer.id,
+			{
+				text: {
+					...text,
+					curve: { ...curve, strength: percent / 100 }
+				}
+			},
+			`text-curve-strength:${layer.id}`
+		);
+	}
+
+	function updateCurveOffset(percent: number): void {
+		const text = layer?.text;
+		const curve = text?.curve;
+		if (!layer || !text || !curve) return;
+		editor.updateLayer(
+			layer.id,
+			{
+				text: {
+					...text,
+					curve: { ...curve, offset: percent / 100 }
+				}
+			},
+			`text-curve-offset:${layer.id}`
+		);
+	}
+
+	type AdjustmentControl = readonly [
+		string,
+		Exclude<keyof ImageEditorImageAdjustments, 'wheels' | 'curves'>,
+		number,
+		number
+	];
+
+	const toneControls: AdjustmentControl[] = [
+		[m.image_editor_brightness(), 'brightness', -1, 1],
+		[m.image_editor_exposure(), 'exposure', -1, 1],
+		[m.image_editor_contrast(), 'contrast', -1, 1],
+		[m.image_editor_highlights(), 'highlights', -1, 1],
+		[m.image_editor_shadows(), 'shadows', -1, 1]
+	];
+	const colorControls: AdjustmentControl[] = [
+		[m.image_editor_temperature(), 'temperature', -1, 1],
+		[m.image_editor_tint(), 'tint', -1, 1],
+		[m.image_editor_vibrance(), 'vibrance', -1, 1],
+		[m.image_editor_saturation(), 'saturation', -1, 1],
+		[m.image_editor_hue(), 'hue', -1, 1]
+	];
+	const detailControls: AdjustmentControl[] = [[m.image_editor_blur(), 'blur', 0, 1]];
+	const adjustmentGroups = [
+		{ label: m.image_editor_tone(), controls: toneControls },
+		{ label: m.image_editor_color(), controls: colorControls },
+		{ label: m.image_editor_detail(), controls: detailControls }
+	];
+
+	function setAdjustment(
+		key: Exclude<keyof ImageEditorImageAdjustments, 'wheels' | 'curves'>,
+		value: number
+	): void {
+		if (!layer?.image) return;
+		editor.updateLayer(
+			layer.id,
+			{
+				image: {
+					...layer.image,
+					adjustments: { ...layer.image.adjustments, [key]: value }
+				}
+			},
+			`image-${key}:${layer.id}`
+		);
+	}
+
+	function applyLook(adjustments: Partial<ImageEditorImageAdjustments>): void {
+		if (!layer?.image) return;
+		editor.updateLayer(layer.id, {
+			image: {
+				...layer.image,
+				adjustments: { ...defaultImageAdjustments(), ...adjustments }
+			}
+		});
+	}
+
+	function lookIsActive(adjustments: Partial<ImageEditorImageAdjustments>): boolean {
+		const image = layer?.image;
+		if (!image) return false;
+		const target = { ...defaultImageAdjustments(), ...adjustments };
+		return imageAdjustmentKeys.every(
+			(key) => Math.abs(image.adjustments[key] - target[key]) < 0.001
+		);
+	}
+</script>
+
+<div class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
+	<div class="flex min-h-9 items-center gap-2 border-b px-3 {onOpenLayers ? 'py-0' : 'py-1'}">
+		<h2 class="min-w-0 flex-1 text-sm font-medium text-foreground">
+			{colorWorkspace ? m.image_editor_color() : m.image_editor_properties()}
+		</h2>
+		{#if colorWorkspace && onOpenLayers}
+			<Button variant="ghost" size="xs" onclick={onOpenLayers}>
+				<ProtectedIcon icon="editor-layers" />
+				{m.image_editor_layers()}
+			</Button>
+		{/if}
+	</div>
+	<div
+		class={colorWorkspace
+			? 'min-h-0 min-w-0 flex-1 overflow-hidden'
+			: 'image-editor-properties-scroll min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-3'}
+	>
+		{#if colorWorkspace}
+			<ImageColorWorkspace />
+		{:else if !layer}
+			<PageBackgroundEditor {onOpenMedia} />
+		{:else}
+			<div class="space-y-5">
+				{#if editor.selectedLayers.length > 1}
+					<p class="rounded-md border bg-muted/40 px-2.5 py-2 text-xs text-muted-foreground">
+						{m.image_editor_mixed_layer_properties({
+							count: editor.selectedLayers.length,
+							name: layer.name
+						})}
+					</p>
+				{/if}
+				{#if applicationFeedback}
+					<p
+						class="rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-xs"
+						role="status"
+					>
+						{applicationFeedback}
+					</p>
+				{/if}
+				{#if layer.type === 'text' && layer.text}
+					<TextContentProperties>
+						<div class="grid grid-cols-2 gap-2">
+							<label class="grid gap-1 text-xs">
+								<span>{m.image_editor_style()}</span>
+								<AppSelect
+									value={selectedTextStyle?.font_style ?? layer.text.font_style}
+									ariaLabel={m.image_editor_style()}
+									disabled={!editor.canEdit || layerLocked}
+									onValueChange={(value) =>
+										editor.updateTextStyle(layer.id, 'font_style', value as 'normal' | 'italic')}
+									options={[
+										{ value: 'normal', label: m.image_editor_normal() },
+										{ value: 'italic', label: m.image_editor_italic() }
+									]}
+									class="h-7 w-full"
+								/>
+							</label>
+							<label class="grid gap-1 text-xs">
+								<span>{m.image_editor_line_height()}</span>
+								<Input
+									type="number"
+									min="0.5"
+									max="4"
+									step="0.05"
+									value={layer.text.line_height}
+									disabled={!editor.canEdit || layerLocked}
+									oninput={(event) =>
+										editor.updateLayer(
+											layer.id,
+											{
+												text: {
+													...layer.text!,
+													line_height: numberValue(event, layer.text!.line_height)
+												}
+											},
+											`line-height:${layer.id}`
+										)}
+								/>
+							</label>
+						</div>
+						<div class="grid grid-cols-2 gap-2">
+							<Button
+								variant={(selectedTextStyle?.underline ?? layer.text.underline)
+									? 'secondary'
+									: 'outline'}
+								size="sm"
+								aria-pressed={Boolean(selectedTextStyle?.underline ?? layer.text.underline)}
+								disabled={!editor.canEdit || layerLocked}
+								onclick={() =>
+									editor.updateTextStyle(
+										layer.id,
+										'underline',
+										!(selectedTextStyle?.underline ?? layer.text!.underline)
+									)}
+							>
+								{m.image_editor_underline()}
+							</Button>
+							<Button
+								variant={layer.text.strike ? 'secondary' : 'outline'}
+								size="sm"
+								aria-pressed={Boolean(layer.text.strike)}
+								disabled={!editor.canEdit || layerLocked}
+								onclick={() =>
+									editor.updateLayer(layer.id, {
+										text: { ...layer.text!, strike: !layer.text!.strike }
+									})}
+							>
+								{m.image_editor_strikethrough()}
+							</Button>
+						</div>
+						<label class="grid gap-1 text-xs">
+							<span>{m.image_editor_text_wrapping()}</span>
+							<AppSelect
+								value={layer.text.wrap ?? 'word'}
+								ariaLabel={m.image_editor_text_wrapping()}
+								disabled={!editor.canEdit || layerLocked}
+								onValueChange={(value) =>
+									editor.updateLayer(layer.id, {
+										text: {
+											...layer.text!,
+											wrap: value as 'word' | 'character'
+										}
+									})}
+								options={[
+									{ value: 'word', label: m.image_editor_wrap_words() },
+									{
+										value: 'character',
+										label: m.image_editor_wrap_characters()
+									}
+								]}
+								class="h-7 w-full"
+							/>
+						</label>
+						<label class="grid gap-1 text-xs">
+							<span>{m.image_editor_letter_spacing()}</span>
+							<Input
+								type="number"
+								min="-20"
+								max="100"
+								step="0.1"
+								value={layer.text.letter_spacing}
+								disabled={!editor.canEdit || layerLocked}
+								oninput={(event) =>
+									editor.updateLayer(
+										layer.id,
+										{
+											text: {
+												...layer.text!,
+												letter_spacing: numberValue(event, layer.text!.letter_spacing)
+											}
+										},
+										`letter-spacing:${layer.id}`
+									)}
+							/>
+						</label>
+
+						<div class="space-y-2 rounded-md border p-2">
+							<label class="grid gap-1 text-xs">
+								<span>{m.image_editor_text_curve()}</span>
+								<AppSelect
+									value={layer.text.curve?.type ?? 'none'}
+									ariaLabel={m.image_editor_text_curve()}
+									disabled={!editor.canEdit || layerLocked}
+									onValueChange={(value) => setTextCurveType(value as ImageEditorTextCurveType)}
+									options={[
+										{ value: 'none', label: m.image_editor_curve_none() },
+										{ value: 'arc_up', label: m.image_editor_curve_arc_up() },
+										{
+											value: 'arc_down',
+											label: m.image_editor_curve_arc_down()
+										},
+										{ value: 'wave', label: m.image_editor_curve_wave() },
+										{ value: 'circle', label: m.image_editor_curve_circle() },
+										{ value: 'ellipse', label: m.image_editor_curve_ellipse() }
+									]}
+									class="h-7 w-full"
+								/>
+							</label>
+							{#if layer.text.curve && layer.text.curve.type !== 'none'}
+								{#if ['arc_up', 'arc_down', 'wave'].includes(layer.text.curve.type)}
+									<SliderRow
+										label={m.image_editor_curve_strength()}
+										value={layer.text.curve.strength * 100}
+										min={5}
+										max={100}
+										step={1}
+										precision={0}
+										disabled={!editor.canEdit || layerLocked}
+										onValueChange={updateCurveStrength}
+										onValueCommit={updateCurveStrength}
+									/>
+								{/if}
+								<SliderRow
+									label={m.image_editor_curve_offset()}
+									value={layer.text.curve.offset * 100}
+									min={-100}
+									max={100}
+									step={1}
+									precision={0}
+									disabled={!editor.canEdit || layerLocked}
+									onValueChange={updateCurveOffset}
+									onValueCommit={updateCurveOffset}
+								/>
+								<Button
+									variant={layer.text.curve.reverse ? 'secondary' : 'outline'}
+									size="xs"
+									onclick={() =>
+										editor.updateLayer(layer.id, {
+											text: {
+												...layer.text!,
+												curve: {
+													...layer.text!.curve!,
+													reverse: !layer.text!.curve!.reverse
+												}
+											}
+										})}
+								>
+									{m.image_editor_curve_reverse()}
+								</Button>
+							{/if}
+						</div>
+						<div class="grid grid-cols-2 gap-2">
+							<label class="grid gap-1 text-xs">
+								<span>{m.image_editor_highlight()}</span>
+								<ColorPicker
+									label={m.image_editor_highlight()}
+									value={layer.text.highlight_color?.slice(0, 7) || '#ffffff'}
+									disabled={!editor.canEdit || layerLocked}
+									{brandColors}
+									recentColors={editor.recentColors}
+									onChange={(value) =>
+										editor.updateLayer(layer.id, {
+											text: { ...layer.text!, highlight_color: value }
+										})}
+									onCommit={(value) => editor.rememberColor(value)}
+								/>
+							</label>
+							<label class="grid gap-1 text-xs">
+								<span>{m.image_editor_stroke()}</span>
+								<ColorPicker
+									label={m.image_editor_stroke()}
+									value={layer.text.stroke_color?.slice(0, 7) || '#000000'}
+									disabled={!editor.canEdit || layerLocked}
+									{brandColors}
+									recentColors={editor.recentColors}
+									onChange={(value) =>
+										editor.updateLayer(layer.id, {
+											text: { ...layer.text!, stroke_color: value }
+										})}
+									onCommit={(value) => editor.rememberColor(value)}
+								/>
+							</label>
+						</div>
+						<label class="grid gap-1 text-xs">
+							<span>{m.image_editor_stroke_width()}</span>
+							<Input
+								type="number"
+								min="0"
+								max="32"
+								step="0.5"
+								value={layer.text.stroke_width}
+								disabled={!editor.canEdit || layerLocked}
+								oninput={(event) =>
+									editor.updateLayer(layer.id, {
+										text: {
+											...layer.text!,
+											stroke_width: numberValue(event, layer.text!.stroke_width)
+										}
+									})}
+							/>
+						</label>
+						<Button
+							variant="ghost"
+							size="xs"
+							onclick={() =>
+								editor.updateLayer(layer.id, {
+									text: {
+										...layer.text!,
+										highlight_color: undefined,
+										stroke_color: undefined,
+										stroke_width: 0,
+										shadow: {
+											color: '#00000000',
+											blur: 0,
+											offset_x: 0,
+											offset_y: 0
+										},
+										curve: defaultTextCurve()
+									}
+								})}>{m.image_editor_clear_text_effects()}</Button
+						>
+					</TextContentProperties>
+				{/if}
+				<Collapsible.Root bind:open={transformOpen} class="border-t pt-2">
+					<Collapsible.Trigger>
+						{#snippet child({ props })}
+							<button
+								{...props}
+								type="button"
+								class="flex min-h-7 w-full items-center gap-2 rounded-md px-2 text-left text-xs font-semibold hover:bg-muted"
+							>
+								<span class="min-w-0 flex-1">{m.image_editor_transform()}</span>
+								{#if selectedTransform}
+									<span class="shrink-0 text-[11px] font-normal text-muted-foreground tabular-nums">
+										{Math.round(selectedTransform.width)}×{Math.round(selectedTransform.height)}
+									</span>
+								{/if}
+								<ThemeIcon
+									role="chevron-down"
+									class={`size-3.5 transition-transform ${transformOpen ? 'rotate-180' : ''}`}
+								/>
+							</button>
+						{/snippet}
+					</Collapsible.Trigger>
+					<Collapsible.Content class="space-y-2 pt-2">
+						{#if editor.selectedLayers.length > 1}
+							<div class="space-y-1.5 rounded-md border bg-muted/20 p-2">
+								<p class="text-xs font-medium">
+									{m.image_editor_transform_layers()}
+								</p>
+								<div class="grid grid-cols-3 gap-1">
+									<Button
+										variant="outline"
+										size="xs"
+										disabled={anySelectionLocked}
+										onclick={() => editor.alignSelected('left')}
+										>{m.image_editor_align_left()}</Button
+									>
+									<Button
+										variant="outline"
+										size="xs"
+										disabled={anySelectionLocked}
+										onclick={() => editor.alignSelected('center_x')}
+										>{m.image_editor_align_center()}</Button
+									>
+									<Button
+										variant="outline"
+										size="xs"
+										disabled={anySelectionLocked}
+										onclick={() => editor.alignSelected('right')}
+										>{m.image_editor_align_right()}</Button
+									>
+									<Button
+										variant="outline"
+										size="xs"
+										disabled={anySelectionLocked}
+										onclick={() => editor.alignSelected('top')}>{m.image_editor_align_top()}</Button
+									>
+									<Button
+										variant="outline"
+										size="xs"
+										disabled={anySelectionLocked}
+										onclick={() => editor.alignSelected('center_y')}
+										>{m.image_editor_align_middle()}</Button
+									>
+									<Button
+										variant="outline"
+										size="xs"
+										disabled={anySelectionLocked}
+										onclick={() => editor.alignSelected('bottom')}
+										>{m.image_editor_align_bottom()}</Button
+									>
+								</div>
+								{#if editor.selectedLayers.length > 2}
+									<div class="grid grid-cols-2 gap-1">
+										<Button
+											variant="outline"
+											size="xs"
+											disabled={anySelectionLocked}
+											onclick={() => editor.distributeSelected('horizontal')}
+											>{m.image_editor_distribute_x()}</Button
+										>
+										<Button
+											variant="outline"
+											size="xs"
+											disabled={anySelectionLocked}
+											onclick={() => editor.distributeSelected('vertical')}
+											>{m.image_editor_distribute_y()}</Button
+										>
+									</div>
+								{/if}
+							</div>
+						{/if}
+						<div class="grid grid-cols-2 gap-2">
+							{#each [['X', 'x'], ['Y', 'y'], ['W', 'width'], ['H', 'height']] as [label, key] (key)}
+								<label class="grid grid-cols-[1.5rem_1fr] items-center">
+									<span class="text-xs text-muted-foreground">{label}</span>
+									<Input
+										type="number"
+										min={key === 'width' || key === 'height' ? 1 : undefined}
+										value={Math.round(
+											selectedTransform?.[key as 'x' | 'y' | 'width' | 'height'] ?? 0
+										)}
+										disabled={!editor.canEdit || selectionLocked}
+										oninput={(event) =>
+											updateNumericTransform(key as 'x' | 'y' | 'width' | 'height', event)}
+									/>
+								</label>
+							{/each}
+						</div>
+						<Button
+							variant={aspectLocked ? 'secondary' : 'ghost'}
+							size="xs"
+							aria-pressed={aspectLocked}
+							onclick={() => (aspectLocked = !aspectLocked)}
+						>
+							{#if aspectLocked}<ThemeIcon role="link" />{:else}<ThemeIcon role="unlink" />{/if}
+							{m.image_editor_lock_aspect_ratio()}
+						</Button>
+						<div class="flex items-center gap-1">
+							<div class="min-w-0 flex-1">
+								<SliderRow
+									label={m.image_editor_rotation()}
+									value={selectedTransform?.rotation ?? 0}
+									min={-180}
+									max={180}
+									step={1}
+									precision={0}
+									disabled={!editor.canEdit || selectionLocked}
+									onValueChange={(rotation) => updateSelectedTransform('rotation', rotation)}
+									onValueCommit={(rotation) => updateSelectedTransform('rotation', rotation)}
+								/>
+							</div>
+							<Button
+								variant="ghost"
+								size="icon-xs"
+								onclick={() => updateSelectedTransform('rotation', 0)}
+								disabled={!editor.canEdit || selectionLocked}
+								aria-label={m.image_editor_reset_rotation()}
+								title={m.image_editor_reset_rotation()}
+							>
+								<ProtectedIcon icon="editor-rotate-left" />
+							</Button>
+						</div>
+						<div class="grid grid-cols-2 gap-2">
+							<Button
+								variant={selectedTransform?.flip_x ? 'secondary' : 'outline'}
+								size="sm"
+								onclick={() =>
+									updateSelectedTransform('flip_x', !(selectedTransform?.flip_x ?? false))}
+							>
+								<ProtectedIcon icon="editor-flip-horizontal" />
+								{m.image_editor_flip_x()}
+							</Button>
+							<Button
+								variant={selectedTransform?.flip_y ? 'secondary' : 'outline'}
+								size="sm"
+								onclick={() =>
+									updateSelectedTransform('flip_y', !(selectedTransform?.flip_y ?? false))}
+							>
+								<ProtectedIcon icon="editor-flip-vertical" />
+								{m.image_editor_flip_y()}
+							</Button>
+						</div>
+						<SliderRow
+							label={mixedOpacity.mixed
+								? m.image_editor_opacity_mixed()
+								: m.image_editor_opacity({ value: Math.round(layer.opacity * 100) })}
+							value={layer.opacity * 100}
+							min={0}
+							max={100}
+							step={1}
+							precision={0}
+							disabled={!editor.canEdit || selectionLocked}
+							onValueChange={updateSelectedOpacityPercent}
+							onValueCommit={updateSelectedOpacityPercent}
+						/>
+					</Collapsible.Content>
+				</Collapsible.Root>
+				<Collapsible.Root bind:open={layerActionsOpen} class="border-t pt-2">
+					<Collapsible.Trigger>
+						{#snippet child({ props })}
+							<button
+								{...props}
+								type="button"
+								class="flex min-h-7 w-full items-center gap-2 rounded-md px-2 text-left text-xs font-semibold hover:bg-muted"
+							>
+								<span class="min-w-0 flex-1">{m.image_editor_layer()}</span>
+								<span class="max-w-32 truncate text-[11px] font-normal text-muted-foreground">
+									{layer.name}
+								</span>
+								<ThemeIcon
+									role="chevron-down"
+									class={`size-3.5 transition-transform ${layerActionsOpen ? 'rotate-180' : ''}`}
+								/>
+							</button>
+						{/snippet}
+					</Collapsible.Trigger>
+					<Collapsible.Content class="space-y-2 pt-2">
+						<label for="layer-name" class="block text-xs font-medium"
+							>{m.image_editor_layer_name()}</label
+						>
+						<Input
+							id="layer-name"
+							value={layer.name}
+							disabled={!editor.canEdit}
+							oninput={(event) => {
+								const name = event.currentTarget.value;
+								if (name.trim()) editor.updateLayer(layer.id, { name }, `layer-name:${layer.id}`);
+							}}
+							onblur={(event) => {
+								const name = event.currentTarget.value.trim();
+								if (!name) event.currentTarget.value = layer.name;
+								else if (name !== layer.name)
+									editor.updateLayer(layer.id, { name }, `layer-name:${layer.id}`);
+							}}
+							onkeydown={(event) => {
+								if (event.key === 'Enter') event.currentTarget.blur();
+							}}
+						/>
+						<div class="grid grid-cols-2 gap-2">
+							<Button variant="outline" size="sm" onclick={() => align('horizontal')}
+								>{m.image_editor_center_x()}</Button
+							>
+							<Button variant="outline" size="sm" onclick={() => align('vertical')}
+								>{m.image_editor_center_y()}</Button
+							>
+						</div>
+						<div class="grid grid-cols-4 gap-1">
+							<Tooltip.Root>
+								<Tooltip.Trigger>
+									{#snippet child({ props })}
+										<Button
+											{...props}
+											variant="outline"
+											size="icon-sm"
+											onclick={() => editor.reorderLayer(layer.id, 'front')}
+											aria-label={m.image_editor_bring_front()}
+											><ProtectedIcon icon="editor-arrange-front" /></Button
+										>
+									{/snippet}
+								</Tooltip.Trigger>
+								<Tooltip.Content>{m.image_editor_bring_front()}</Tooltip.Content>
+							</Tooltip.Root>
+							<Tooltip.Root>
+								<Tooltip.Trigger>
+									{#snippet child({ props })}
+										<Button
+											{...props}
+											variant="outline"
+											size="icon-sm"
+											onclick={() => editor.reorderLayer(layer.id, 'back')}
+											aria-label={m.image_editor_send_back()}
+											><ProtectedIcon icon="editor-arrange-back" /></Button
+										>
+									{/snippet}
+								</Tooltip.Trigger>
+								<Tooltip.Content>{m.image_editor_send_back()}</Tooltip.Content>
+							</Tooltip.Root>
+							<Tooltip.Root>
+								<Tooltip.Trigger>
+									{#snippet child({ props })}
+										<Button
+											{...props}
+											variant="outline"
+											size="icon-sm"
+											onclick={() => editor.duplicateSelected()}
+											aria-label={m.image_editor_duplicate()}><ThemeIcon role="copy" /></Button
+										>
+									{/snippet}
+								</Tooltip.Trigger>
+								<Tooltip.Content>{m.image_editor_duplicate()}</Tooltip.Content>
+							</Tooltip.Root>
+							<Tooltip.Root>
+								<Tooltip.Trigger>
+									{#snippet child({ props })}
+										<Button
+											{...props}
+											variant="destructive"
+											size="icon-sm"
+											disabled={selectionLocked}
+											onclick={() => editor.deleteSelected()}
+											aria-label={m.image_editor_delete_layer()}><ThemeIcon role="delete" /></Button
+										>
+									{/snippet}
+								</Tooltip.Trigger>
+								<Tooltip.Content>{m.image_editor_delete_layer()}</Tooltip.Content>
+							</Tooltip.Root>
+						</div>
+					</Collapsible.Content>
+				</Collapsible.Root>
+
+				{#if layer.type !== 'group'}
+					{#key layer.id}<LayerEffectsPanel {layer} />{/key}
+				{/if}
+				{#if layer.image}
+					<LensEffectProperties {layer} />
+					{#key layer.id}<AnimationProperties {layer} />{/key}
+				{/if}
+
+				{#if layer.type === 'shape' && layer.shape}
+					<section class="space-y-2 border-t pt-4">
+						<h3 class="text-xs font-medium text-muted-foreground">
+							{m.image_editor_shape()}
+						</h3>
+						<label class="grid gap-1 text-xs">
+							<span>{m.image_editor_shape_kind()}</span>
+							<AppSelect
+								value={layer.shape.kind}
+								ariaLabel={m.image_editor_shape_kind()}
+								disabled={!editor.canEdit || layerLocked}
+								onValueChange={(value) =>
+									editor.updateLayer(layer.id, {
+										shape: {
+											...layer.shape!,
+											kind: value as 'rectangle' | 'rounded_rectangle' | 'ellipse' | 'line',
+											radius:
+												value === 'rounded_rectangle'
+													? Math.max(24, layer.shape!.radius)
+													: layer.shape!.radius
+										}
+									})}
+								options={[
+									{ value: 'rectangle', label: m.image_editor_rectangle() },
+									{
+										value: 'rounded_rectangle',
+										label: m.image_editor_rounded_rectangle()
+									},
+									{ value: 'ellipse', label: m.image_editor_ellipse() },
+									{ value: 'line', label: m.image_editor_line() }
+								]}
+								class="h-7 w-full"
+							/>
+						</label>
+						<label class="grid gap-1 text-xs">
+							<span>{m.image_editor_fill()}</span>
+							<ColorPicker
+								label={m.image_editor_fill()}
+								value={layer.shape.fill}
+								disabled={!editor.canEdit || layerLocked}
+								{brandColors}
+								recentColors={editor.recentColors}
+								onChange={(value) =>
+									editor.updateLayer(
+										layer.id,
+										{ shape: { ...layer.shape!, fill: value } },
+										`shape-fill:${layer.id}`
+									)}
+								onCommit={(value) => editor.rememberColor(value)}
+							/>
+						</label>
+						<Button
+							variant={layer.shape.fill === '#00000000' ? 'secondary' : 'ghost'}
+							size="xs"
+							disabled={!editor.canEdit || layerLocked || layer.shape.kind === 'line'}
+							onclick={() =>
+								editor.updateLayer(layer.id, {
+									shape: { ...layer.shape!, fill: '#00000000' }
+								})}
+						>
+							{m.image_editor_no_fill()}
+						</Button>
+						<div class="grid grid-cols-2 gap-2">
+							<label class="grid gap-1 text-xs">
+								<span>{m.image_editor_stroke()}</span>
+								<ColorPicker
+									label={m.image_editor_stroke()}
+									value={layer.shape.stroke}
+									disabled={!editor.canEdit || layerLocked}
+									{brandColors}
+									recentColors={editor.recentColors}
+									onChange={(value) =>
+										editor.updateLayer(layer.id, {
+											shape: { ...layer.shape!, stroke: value }
+										})}
+									onCommit={(value) => editor.rememberColor(value)}
+								/>
+							</label>
+							<label class="grid gap-1 text-xs">
+								<span>{m.image_editor_stroke_width()}</span>
+								<Input
+									type="number"
+									min="0"
+									max="64"
+									value={layer.shape.stroke_width}
+									disabled={!editor.canEdit || layerLocked}
+									oninput={(event) =>
+										editor.updateLayer(layer.id, {
+											shape: {
+												...layer.shape!,
+												stroke_width: numberValue(event, layer.shape!.stroke_width)
+											}
+										})}
+								/>
+							</label>
+						</div>
+						<Button
+							variant={layer.shape.stroke_width === 0 ? 'secondary' : 'ghost'}
+							size="xs"
+							disabled={!editor.canEdit || layerLocked}
+							onclick={() =>
+								editor.updateLayer(layer.id, {
+									shape: { ...layer.shape!, stroke_width: 0 }
+								})}
+						>
+							{m.image_editor_no_stroke()}
+						</Button>
+						<label class="grid gap-1 text-xs">
+							<span>{m.image_editor_corner_radius()}</span>
+							<Input
+								type="number"
+								min="0"
+								value={layer.shape.radius}
+								disabled={!editor.canEdit ||
+									layerLocked ||
+									!['rectangle', 'rounded_rectangle'].includes(layer.shape.kind)}
+								oninput={(event) =>
+									editor.updateLayer(layer.id, {
+										shape: {
+											...layer.shape!,
+											kind:
+												numberValue(event, layer.shape!.radius) > 0
+													? 'rounded_rectangle'
+													: 'rectangle',
+											radius: Math.max(0, numberValue(event, layer.shape!.radius))
+										}
+									})}
+							/>
+						</label>
+					</section>
+				{/if}
+
+				{#if layer.type === 'image' && layer.image}
+					{#if onAIEdit}<Button
+							variant="outline"
+							class="w-full [@media(pointer:coarse)]:min-h-11"
+							disabled={!editor.canEdit || layerLocked || editor.selectedLayers.length !== 1}
+							onclick={onAIEdit}><ThemeIcon role="image-add" />{m.image_ai_edit()}</Button
+						>{/if}
+					<section class="space-y-2 border-t pt-4">
+						<h3 class="text-xs font-medium text-muted-foreground">
+							{m.image_editor_image()}
+						</h3>
+						<label class="grid gap-1 text-xs">
+							<span>{m.image_editor_fit()}</span>
+							<AppSelect
+								value={layer.image.fit}
+								ariaLabel={m.image_editor_fit()}
+								disabled={!editor.canEdit || layerLocked}
+								onValueChange={(value) =>
+									editor.updateLayer(layer.id, {
+										image: {
+											...layer.image!,
+											fit: value as 'cover' | 'contain' | 'stretch'
+										}
+									})}
+								options={[
+									{ value: 'cover', label: m.image_editor_cover() },
+									{ value: 'contain', label: m.image_editor_contain() },
+									{ value: 'stretch', label: m.image_editor_stretch() }
+								]}
+								class="h-7 w-full"
+							/>
+						</label>
+						<Collapsible.Root bind:open={cropOpen} class="rounded-md border">
+							<div class="flex min-h-7 items-center gap-1 px-1">
+								<Collapsible.Trigger>
+									{#snippet child({ props })}
+										<button
+											{...props}
+											type="button"
+											class="flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded px-1.5 text-left text-xs font-medium hover:bg-muted"
+											title={m.image_editor_crop_percent()}
+										>
+											<ProtectedIcon icon="editor-crop" class="size-3.5" />
+											<span class="min-w-0 flex-1">{m.image_editor_crop()}</span>
+											<span class="shrink-0 font-normal text-muted-foreground tabular-nums">
+												{Math.round(cropValue('width') * 100)}% × {Math.round(
+													cropValue('height') * 100
+												)}%
+											</span>
+											<ThemeIcon
+												role="chevron-down"
+												class="size-3.5 transition-transform data-[open=true]:rotate-180"
+												data-open={cropOpen}
+											/>
+										</button>
+									{/snippet}
+								</Collapsible.Trigger>
+								<Button
+									variant="ghost"
+									size="xs"
+									onclick={() => (editor.activeTool = 'crop')}
+									disabled={!editor.canEdit || layerLocked}
+								>
+									{m.image_editor_edit_crop()}
+								</Button>
+								<Button
+									variant="ghost"
+									size="xs"
+									onclick={() =>
+										editor.updateLayer(layer.id, {
+											image: {
+												...layer.image!,
+												crop: { x: 0, y: 0, width: 1, height: 1 }
+											}
+										})}
+								>
+									{m.image_editor_reset()}
+								</Button>
+							</div>
+							<Collapsible.Content class="border-t p-2">
+								<div class="grid grid-cols-2 gap-2">
+									{#each [['X', 'x'], ['Y', 'y'], ['W', 'width'], ['H', 'height']] as [label, key] (key)}
+										<label class="grid grid-cols-[1.25rem_1fr] items-center gap-1 text-xs">
+											<span class="text-muted-foreground">{label}</span>
+											<Input
+												type="number"
+												min="0"
+												max="100"
+												step="1"
+												value={Math.round(cropValue(key as 'x' | 'y' | 'width' | 'height') * 100)}
+												disabled={!editor.canEdit || layerLocked}
+												oninput={(event) =>
+													updateCrop(
+														key as 'x' | 'y' | 'width' | 'height',
+														event,
+														cropValue(key as 'x' | 'y' | 'width' | 'height')
+													)}
+											/>
+										</label>
+									{/each}
+								</div>
+							</Collapsible.Content>
+						</Collapsible.Root>
+						{#if layer.erase_mask}
+							<Button
+								variant="outline"
+								size="sm"
+								class="w-full"
+								disabled={!editor.canEdit || layerLocked}
+								onclick={() => editor.restoreImageEraseMask(layer.id)}
+							>
+								{m.image_editor_restore_erased_image()}
+							</Button>
+						{/if}
+						<div class="space-y-2">
+							<span class="text-xs font-medium">{m.image_editor_quick_looks()}</span>
+							<div class="grid grid-cols-3 gap-1">
+								{#each EDITOR_COLOR_GRADE_PRESETS as look (look.id)}
+									<Button
+										variant={lookIsActive(look.adjustments) ? 'secondary' : 'outline'}
+										size="xs"
+										aria-pressed={lookIsActive(look.adjustments)}
+										onclick={() => applyLook(look.adjustments)}
+									>
+										{editorColorGradePresetLabel(look.id)}
+									</Button>
+								{/each}
+							</div>
+						</div>
+						<Collapsible.Root bind:open={adjustmentsOpen} class="rounded-md border">
+							<div class="flex min-h-7 items-center gap-1 px-1">
+								<Collapsible.Trigger>
+									{#snippet child({ props })}
+										<button
+											{...props}
+											type="button"
+											class="flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded px-1.5 text-left text-xs font-medium hover:bg-muted"
+										>
+											<span class="min-w-0 flex-1">{m.image_editor_adjustments()}</span>
+											<ThemeIcon
+												role="chevron-down"
+												class={`size-3.5 transition-transform ${adjustmentsOpen ? 'rotate-180' : ''}`}
+											/>
+										</button>
+									{/snippet}
+								</Collapsible.Trigger>
+								<Button
+									variant="ghost"
+									size="xs"
+									onclick={() =>
+										editor.updateLayer(layer.id, {
+											image: {
+												...layer.image!,
+												adjustments: defaultImageAdjustments()
+											}
+										})}
+								>
+									{m.image_editor_reset_all()}
+								</Button>
+							</div>
+							<Collapsible.Content class="space-y-3 border-t p-2">
+								{#each adjustmentGroups as group (group.label)}
+									<div class="space-y-3 not-first:border-t not-first:pt-3">
+										<h4 class="text-xs font-medium">{group.label}</h4>
+										{#each group.controls as [label, key, min, max] (key)}
+											<SliderRow
+												{label}
+												value={layer.image.adjustments[key] * 100}
+												min={min * 100}
+												max={max * 100}
+												step={1}
+												precision={0}
+												disabled={!editor.canEdit || layerLocked}
+												onValueChange={(value) => setAdjustment(key, value / 100)}
+												onValueCommit={(value) => setAdjustment(key, value / 100)}
+											/>
+										{/each}
+									</div>
+								{/each}
+							</Collapsible.Content>
+						</Collapsible.Root>
+					</section>
+				{/if}
+			</div>
+		{/if}
+	</div>
+</div>
+
+<style>
+	@layer base {
+		.image-editor-properties-scroll :global(.grid > *),
+		.image-editor-properties-scroll :global(.flex > *) {
+			min-width: 0;
+		}
+	}
+</style>

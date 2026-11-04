@@ -1,0 +1,440 @@
+package analytics
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/openpost/backend/internal/database"
+	"github.com/openpost/backend/internal/models"
+	"github.com/openpost/backend/internal/platform"
+	"github.com/openpost/backend/internal/services/usage"
+	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
+)
+
+var analyticsTestSchemaPath string
+
+func TestMain(m *testing.M) {
+	templateDir, err := os.MkdirTemp("", "openpost-analytics-tests-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create analytics test template directory: %v\n", err)
+		os.Exit(1)
+	}
+	analyticsTestSchemaPath = filepath.Join(templateDir, "schema.db")
+	db, err := database.InitDB("file:" + analyticsTestSchemaPath + "?mode=rwc")
+	if err == nil {
+		err = database.CreateSchema(db)
+	}
+	if db != nil {
+		if closeErr := db.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create analytics test schema: %v\n", err)
+		_ = os.RemoveAll(templateDir)
+		os.Exit(1)
+	}
+
+	code := m.Run()
+	if err := os.RemoveAll(templateDir); err != nil && code == 0 {
+		fmt.Fprintf(os.Stderr, "remove analytics test template directory: %v\n", err)
+		code = 1
+	}
+	os.Exit(code)
+}
+
+func TestOverviewCursorCannotCrossWorkspaceAccountSortRevisionOrSignature(t *testing.T) {
+	service := NewService(nil, nil)
+	options := normalizeOverviewOptions(OverviewOptions{AccountID: "account-a", Sort: "newest", Limit: 1})
+	cursor := service.encodeOverviewNextCursor("workspace-a", 0, 1, 2, options, 30, "revision-a", time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC))
+
+	// Control: an unchanged subject still decodes to its encoded offset.
+	unchanged := normalizeOverviewOptions(OverviewOptions{AccountID: "account-a", Sort: "newest", Limit: 1, Cursor: cursor})
+	offset, err := service.decodeOverviewOffset("workspace-a", unchanged, 30, 2, "revision-a")
+	require.NoError(t, err)
+	require.Equal(t, 1, offset)
+
+	options.AccountID = "account-b"
+	options.Cursor = cursor
+	_, err = service.decodeOverviewOffset("workspace-a", options, 30, 2, "revision-a")
+	require.ErrorIs(t, err, ErrInvalidOverviewCursor)
+
+	options = normalizeOverviewOptions(OverviewOptions{AccountID: "account-a", Sort: "newest", Limit: 1, Cursor: cursor})
+	_, err = service.decodeOverviewOffset("workspace-a", options, 30, 2, "revision-b")
+	require.ErrorIs(t, err, ErrInvalidOverviewCursor)
+
+	_, err = service.decodeOverviewOffset("workspace-b", options, 30, 2, "revision-a")
+	require.ErrorIs(t, err, ErrInvalidOverviewCursor)
+
+	// Sort is part of the bound subject too: the same page must not be replayed
+	// against a different ordering.
+	resorted := normalizeOverviewOptions(OverviewOptions{AccountID: "account-a", Sort: "views", Limit: 1, Cursor: cursor})
+	_, err = service.decodeOverviewOffset("workspace-a", resorted, 30, 2, "revision-a")
+	require.ErrorIs(t, err, ErrInvalidOverviewCursor)
+
+	options.Cursor = cursor[:len(cursor)-1] + "x"
+	_, err = service.decodeOverviewOffset("workspace-a", options, 30, 2, "revision-a")
+	require.ErrorIs(t, err, ErrInvalidOverviewCursor)
+}
+
+type staticTokenSource struct{}
+
+func (staticTokenSource) GetValidAccessToken(context.Context, string) (string, error) {
+	return "token", nil
+}
+
+type fakeAnalyticsAdapter struct {
+	platform.Adapter
+	support        platform.AnalyticsSupport
+	account        platform.AnalyticsValues
+	content        platform.AnalyticsValues
+	accountErr     error
+	contentErr     error
+	accountCalls   int
+	contentCalls   int
+	onAccountFetch func()
+}
+
+type fakeSemanticAnalyticsAdapter struct {
+	fakeAnalyticsAdapter
+	accountMeasurements platform.AnalyticsMeasurements
+	contentMeasurements platform.AnalyticsMeasurements
+}
+
+func (f *fakeSemanticAnalyticsAdapter) FetchAccountAnalyticsMeasurements(context.Context, string, platform.AccountAnalyticsRequest) (platform.AnalyticsMeasurements, error) {
+	return f.accountMeasurements, f.accountErr
+}
+
+func (f *fakeSemanticAnalyticsAdapter) FetchContentAnalyticsMeasurements(context.Context, string, platform.ContentAnalyticsRequest) (platform.AnalyticsMeasurements, error) {
+	return f.contentMeasurements, f.contentErr
+}
+
+func (f *fakeAnalyticsAdapter) AnalyticsSupport() platform.AnalyticsSupport {
+	return f.support
+}
+
+func (f *fakeAnalyticsAdapter) FetchAccountAnalytics(context.Context, string, platform.AccountAnalyticsRequest) (platform.AnalyticsValues, error) {
+	f.accountCalls++
+	if f.onAccountFetch != nil {
+		f.onAccountFetch()
+	}
+	return f.account, f.accountErr
+}
+
+func (f *fakeAnalyticsAdapter) FetchContentAnalytics(context.Context, string, platform.ContentAnalyticsRequest) (platform.AnalyticsValues, error) {
+	f.contentCalls++
+	return f.content, f.contentErr
+}
+
+func TestPinterestAnalyticsReadinessFailsClosedBeforeProviderCallAndPreservesHistory(t *testing.T) {
+	db := newAnalyticsTestDB(t)
+	account := seedAnalyticsAccount(t, db, "pins:read user_accounts:read")
+	account.Platform = "pinterest"
+	_, err := db.NewUpdate().Model(&account).Column("platform", "granted_scopes").WherePK().Exec(t.Context())
+	require.NoError(t, err)
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	existing := &models.AnalyticsSyncState{
+		ID: stateID(subjectAccount, account.ID), WorkspaceID: account.WorkspaceID,
+		SubjectType: subjectAccount, SubjectID: account.ID, SocialAccountID: account.ID, Platform: account.Platform,
+		Status: string(platform.AnalyticsStatusOK), MetricsJSON: `{"impressions":42}`,
+		MetricMetadataJSON: `{}`, LastSuccessAt: now.Add(-time.Hour), CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour),
+	}
+	_, err = db.NewInsert().Model(existing).Exec(t.Context())
+	require.NoError(t, err)
+	adapter := &fakeAnalyticsAdapter{
+		support: platform.AnalyticsSupport{Account: true, AccountRequiredScopes: []string{"pins:read", "user_accounts:read"}},
+		account: platform.AnalyticsValues{platform.MetricImpressions: 99},
+	}
+	service := NewService(db, staticTokenSource{})
+	service.SetProvider("pinterest", adapter)
+	service.SetFeatureGate(alwaysEnabledGate{})
+	service.now = func() time.Time { return now }
+
+	require.NoError(t, service.syncAccount(t.Context(), account.ID))
+	require.Zero(t, adapter.accountCalls, "readiness must be checked before the Pinterest provider call")
+	state, err := service.loadState(t.Context(), subjectAccount, account.ID)
+	require.NoError(t, err)
+	require.Equal(t, "provider_readiness_blocked", state.ErrorCode)
+	require.JSONEq(t, `{"impressions":42}`, state.MetricsJSON, "blocking stale or missing certification must not delete stored history")
+}
+
+func TestSemanticMeasurementsRoundTripAndIncompatibleMetricsDoNotAggregate(t *testing.T) {
+	db := newAnalyticsTestDB(t)
+	ctx := context.Background()
+	account := seedAnalyticsAccount(t, db, "")
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	publication := seedAnalyticsPublication(t, db, account.WorkspaceID, "publication-semantics", now)
+	rendition := models.Rendition{
+		ID: "rendition-semantics", PublicationID: publication.ID, SocialAccountID: account.ID,
+		Platform: account.Platform, Profile: "short_text", Status: models.RenditionStatusPublished,
+		ExternalID: "provider-semantics", CreatedAt: now, UpdatedAt: now,
+	}
+	_, err := db.NewInsert().Model(&rendition).Exec(ctx)
+	require.NoError(t, err)
+
+	periodStart := now.Add(-24 * time.Hour)
+	periodEnd := now
+	scale := int64(100)
+	adapter := &fakeSemanticAnalyticsAdapter{
+		fakeAnalyticsAdapter: fakeAnalyticsAdapter{support: platform.AnalyticsSupport{Account: true, Content: true}},
+		accountMeasurements: platform.AnalyticsMeasurements{
+			platform.MetricFollowers: {
+				Value: 42,
+				AnalyticsMetricMetadata: platform.AnalyticsMetricMetadata{
+					Unit: platform.AnalyticsMetricUnitCount, Aggregation: platform.AnalyticsMetricAggregationCurrentSnapshot,
+				},
+			},
+		},
+		contentMeasurements: platform.AnalyticsMeasurements{
+			platform.MetricLikes: {
+				Value: 3,
+				AnalyticsMetricMetadata: platform.AnalyticsMetricMetadata{
+					Unit: platform.AnalyticsMetricUnitCount, Aggregation: platform.AnalyticsMetricAggregationLifetimeTotal,
+				},
+			},
+			platform.MetricViews: {
+				Value: 1250,
+				AnalyticsMetricMetadata: platform.AnalyticsMetricMetadata{
+					Unit: platform.AnalyticsMetricUnitMilliseconds, Aggregation: platform.AnalyticsMetricAggregationLifetimeTotal,
+					Source: "provider_report", Scale: &scale,
+				},
+			},
+			platform.MetricImpressions: {
+				Value: 800,
+				AnalyticsMetricMetadata: platform.AnalyticsMetricMetadata{
+					Unit: platform.AnalyticsMetricUnitCount, Aggregation: platform.AnalyticsMetricAggregationReportingPeriodTotal,
+					PeriodStart: &periodStart, PeriodEnd: &periodEnd,
+				},
+			},
+			"completion_rate": {
+				Value: 8750,
+				AnalyticsMetricMetadata: platform.AnalyticsMetricMetadata{
+					Unit: platform.AnalyticsMetricUnitBasisPoints, Aggregation: platform.AnalyticsMetricAggregationReportingPeriodAverage,
+					Source: "provider_report", PeriodStart: &periodStart, PeriodEnd: &periodEnd,
+				},
+			},
+		},
+	}
+	service := NewService(db, staticTokenSource{})
+	service.SetFeatureGate(alwaysEnabledGate{})
+	service.SetProvider("test", adapter)
+	service.now = func() time.Time { return now }
+
+	require.NoError(t, service.syncAccount(ctx, account.ID))
+	require.NoError(t, service.syncRendition(ctx, rendition.ID))
+	var accountState models.AnalyticsSyncState
+	require.NoError(t, db.NewSelect().Model(&accountState).Where("id = ?", stateID(subjectAccount, account.ID)).Scan(ctx))
+	var accountSnapshot models.AnalyticsAccountSnapshot
+	require.NoError(t, db.NewSelect().Model(&accountSnapshot).Where("social_account_id = ?", account.ID).Scan(ctx))
+	require.JSONEq(t, accountState.MetricsJSON, accountSnapshot.MetricsJSON)
+	require.JSONEq(t, accountState.MetricMetadataJSON, accountSnapshot.MetricMetadataJSON)
+
+	var state models.AnalyticsSyncState
+	require.NoError(t, db.NewSelect().Model(&state).Where("id = ?", stateID(subjectRendition, rendition.ID)).Scan(ctx))
+	var snapshot models.AnalyticsRenditionSnapshot
+	require.NoError(t, db.NewSelect().Model(&snapshot).Where("rendition_id = ?", rendition.ID).Scan(ctx))
+	require.JSONEq(t, state.MetricsJSON, snapshot.MetricsJSON)
+	require.JSONEq(t, state.MetricMetadataJSON, snapshot.MetricMetadataJSON)
+
+	values, metadata := decodeAnalyticsMetrics(state.MetricsJSON, state.MetricMetadataJSON, platform.AnalyticsMetricSubjectContent, state.Platform)
+	require.Equal(t, int64(1250), values[platform.MetricViews])
+	require.Equal(t, platform.AnalyticsMetricUnitMilliseconds, metadata[platform.MetricViews].Unit)
+	require.Equal(t, "provider_report", metadata[platform.MetricViews].Source)
+	require.Equal(t, scale, *metadata[platform.MetricViews].Scale)
+	require.Equal(t, platform.AnalyticsMetricUnitBasisPoints, metadata["completion_rate"].Unit)
+	require.Equal(t, periodStart, *metadata["completion_rate"].PeriodStart)
+	require.Equal(t, periodEnd, *metadata["completion_rate"].PeriodEnd)
+
+	overview, err := service.Overview(ctx, account.WorkspaceID, 30)
+	require.NoError(t, err)
+	require.Equal(t, int64(42), overview.Summary.Followers.Value)
+	require.Equal(t, int64(3), overview.Summary.Engagement.Value)
+	require.Zero(t, overview.Summary.Views.Value)
+	require.Zero(t, overview.Summary.Views.Measured)
+	require.Zero(t, overview.Summary.Impressions.Measured)
+	require.Empty(t, overview.Trends.Views)
+	require.Equal(t, int64(1250), overview.Content[0].Metrics[platform.MetricViews], "incompatible raw measurements remain inspectable")
+	require.Equal(t, platform.AnalyticsMetricUnitMilliseconds, overview.Content[0].MetricMetadata[platform.MetricViews].Unit)
+}
+
+func TestProviderFailurePreservesLastSuccessWithoutRetryingQueueJob(t *testing.T) {
+	db := newAnalyticsTestDB(t)
+	ctx := context.Background()
+	account := seedAnalyticsAccount(t, db, "")
+	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
+	service := NewService(db, staticTokenSource{})
+	service.SetFeatureGate(alwaysEnabledGate{})
+	service.now = func() time.Time { return now }
+	adapter := &fakeAnalyticsAdapter{
+		support: platform.AnalyticsSupport{Account: true},
+		account: platform.AnalyticsValues{platform.MetricFollowers: 42},
+	}
+	service.SetProvider("test", adapter)
+
+	require.NoError(t, service.syncAccount(ctx, account.ID))
+	adapter.accountErr = &platform.AnalyticsError{
+		Status:     platform.AnalyticsStatusRateLimited,
+		Code:       "rate_limit",
+		RetryAfter: 2 * time.Hour,
+	}
+	now = now.Add(time.Hour)
+	require.NoError(t, service.syncAccount(ctx, account.ID))
+
+	var state models.AnalyticsSyncState
+	require.NoError(t, db.NewSelect().Model(&state).Where("id = ?", stateID(subjectAccount, account.ID)).Scan(ctx))
+	require.Equal(t, string(platform.AnalyticsStatusRateLimited), state.Status)
+	require.JSONEq(t, `{"followers":42}`, state.MetricsJSON)
+	require.True(t, now.Add(2*time.Hour).Equal(state.NextSyncAt))
+	require.True(t, now.Add(-time.Hour).Equal(state.LastSuccessAt))
+}
+
+func seedAnalyticsPublication(t *testing.T, db *bun.DB, workspaceID, id string, now time.Time) models.Publication {
+	t.Helper()
+	publication := models.Publication{
+		ID: id, WorkspaceID: workspaceID, CreatedByID: "user-1", Title: "Launch",
+		Intent: "post", ContentProfile: "short_text", SourceText: "Launch",
+		SourceContent: "Launch", Status: models.PublicationStatusPublished,
+		ActualRunAt: now.Add(-time.Hour), CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now.Add(-time.Hour),
+	}
+	_, err := db.NewInsert().Model(&publication).Exec(context.Background())
+	require.NoError(t, err)
+	return publication
+}
+
+type alwaysEnabledGate struct{}
+
+func (alwaysEnabledGate) IsEffectiveEnabled(context.Context, string, string) (bool, error) {
+	return true, nil
+}
+
+func newAnalyticsTestDB(t *testing.T) *bun.DB {
+	t.Helper()
+	template, err := os.ReadFile(analyticsTestSchemaPath)
+	require.NoError(t, err)
+	databasePath := filepath.Join(t.TempDir(), "analytics.db")
+	require.NoError(t, os.WriteFile(databasePath, template, 0o600))
+	db, err := database.InitDB("file:" + databasePath + "?mode=rwc")
+	require.NoError(t, err)
+	now := time.Now().UTC()
+	_, err = db.NewInsert().Model(&models.Organization{ID: "organization-1", Name: "Analytics", CreatedByID: "user-1", CreatedAt: now, UpdatedAt: now}).Exec(t.Context())
+	require.NoError(t, err)
+	_, err = db.NewInsert().Model(&models.Workspace{ID: "workspace-1", OrganizationID: "organization-1", Name: "Analytics", CreatedAt: now}).Exec(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	return db
+}
+
+func seedAnalyticsAccount(t *testing.T, db *bun.DB, scopes string) models.SocialAccount {
+	t.Helper()
+	account := models.SocialAccount{
+		ID:              "account-1",
+		WorkspaceID:     "workspace-1",
+		Slug:            "test-account",
+		Platform:        "test",
+		AccountID:       "provider-account",
+		AccountUsername: "person",
+		AccessTokenEnc:  []byte("encrypted"),
+		GrantedScopes:   scopes,
+		IsActive:        true,
+		CreatedAt:       time.Now().UTC(),
+	}
+	_, err := db.NewInsert().Model(&account).Exec(context.Background())
+	require.NoError(t, err)
+	return account
+}
+
+func TestXAnalyticsUsesDailyCadenceAndDoesNotRepeatForcedReads(t *testing.T) {
+	db := newAnalyticsTestDB(t)
+	account := seedAnalyticsAccount(t, db, "")
+	account.Platform = "x"
+	_, err := db.NewUpdate().Model(&account).Column("platform").WherePK().Exec(t.Context())
+	require.NoError(t, err)
+	// Match the microsecond precision preserved by the database.
+	now := time.Date(2026, time.October, 10, 9, 30, 0, 123456000, time.UTC)
+	publication := seedAnalyticsPublication(t, db, account.WorkspaceID, "x-publication", now)
+	rendition := &models.Rendition{ID: "x-rendition", PublicationID: publication.ID, SocialAccountID: account.ID, Platform: "x", TargetKey: "x", Status: models.RenditionStatusPublished, ExternalID: "123", CreatedAt: now, UpdatedAt: now}
+	_, err = db.NewInsert().Model(rendition).Exec(t.Context())
+	require.NoError(t, err)
+	adapter := &fakeAnalyticsAdapter{support: platform.AnalyticsSupport{Account: true, Content: true}, content: platform.AnalyticsValues{platform.MetricLikes: 3}}
+	service := NewService(db, staticTokenSource{})
+	service.SetProvider("x", adapter)
+	service.SetFeatureGate(alwaysEnabledGate{})
+	service.now = func() time.Time { return now }
+	require.NoError(t, service.syncRendition(t.Context(), rendition.ID))
+	state, err := service.loadState(t.Context(), subjectRendition, rendition.ID)
+	require.NoError(t, err)
+	require.True(t, now.Add(24*time.Hour).Equal(state.NextSyncAt), "stored next sync %s, expected %s", state.NextSyncAt.Format(time.RFC3339Nano), now.Add(24*time.Hour).Format(time.RFC3339Nano))
+	require.NoError(t, service.syncRendition(t.Context(), rendition.ID))
+	require.Equal(t, 1, adapter.contentCalls)
+}
+
+func TestXAnalyticsReservesReadBudgetBeforeProviderRequest(t *testing.T) {
+	db := newAnalyticsTestDB(t)
+	account := seedAnalyticsAccount(t, db, "")
+	account.Platform = "x"
+	_, err := db.NewUpdate().Model(&account).Column("platform").WherePK().Exec(t.Context())
+	require.NoError(t, err)
+	meter := usage.NewService(db)
+	require.NoError(t, meter.SetProviderCostPolicy(usage.NewXProviderCostPolicy(10_000, 15_000, 200_000)))
+	adapter := &fakeAnalyticsAdapter{support: platform.AnalyticsSupport{Account: true}, account: platform.AnalyticsValues{platform.MetricFollowers: 5}}
+	// The reservation must already be durable when the provider request starts,
+	// so an accepted read can never be unbilled.
+	reservedBeforeFetch := false
+	adapter.onAccountFetch = func() {
+		var reservations []models.ProviderUsageReservation
+		require.NoError(t, db.NewSelect().Model(&reservations).Where("workspace_id = ?", account.WorkspaceID).Scan(t.Context()))
+		require.Len(t, reservations, 1, "read exposure must be reserved before the provider request")
+		require.Equal(t, usage.ProviderX, reservations[0].Provider)
+		require.Equal(t, usage.XOperationUserRead, reservations[0].Operation)
+		require.EqualValues(t, 1, reservations[0].Units)
+		require.EqualValues(t, 10_000, reservations[0].CostMicrousd)
+		require.Equal(t, "pending", reservations[0].State, "the exposure must still be reserved, not yet confirmed")
+		require.NotEmpty(t, reservations[0].OperationKey)
+		reservedBeforeFetch = true
+	}
+	service := NewService(db, staticTokenSource{})
+	service.SetProvider("x", adapter)
+	service.SetFeatureGate(alwaysEnabledGate{})
+	service.SetUsage(meter)
+	// Pin the clock mid-month: the X budget window is the calendar month of the
+	// event time, and the retry below adds 25 hours. A real-clock start on the
+	// last day of a month would cross into the next budget period and make the
+	// budget-exhaustion assertion date-dependent.
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	require.NoError(t, service.syncAccount(t.Context(), account.ID))
+	require.True(t, reservedBeforeFetch, "the provider request must observe the reservation")
+	require.Equal(t, 1, adapter.accountCalls)
+	var events []models.ProviderUsageEvent
+	require.NoError(t, db.NewSelect().Model(&events).Scan(t.Context()))
+	require.Len(t, events, 1)
+	require.Equal(t, "user_read", events[0].Operation)
+	require.EqualValues(t, 10_000, events[0].CostMicrousd)
+	now = now.Add(25 * time.Hour)
+	require.NoError(t, service.syncAccount(t.Context(), account.ID))
+	require.Equal(t, 1, adapter.accountCalls, "budget exhaustion must prevent I/O")
+	state, err := service.loadState(t.Context(), subjectAccount, account.ID)
+	require.NoError(t, err)
+	require.Equal(t, "provider_budget_exceeded", state.ErrorCode)
+}
+
+func TestSweepRetentionFailureStillSchedulesNextSweep(t *testing.T) {
+	db := newAnalyticsTestDB(t)
+	_, err := db.NewDropTable().Model((*models.AnalyticsAccountSnapshot)(nil)).Exec(t.Context())
+	require.NoError(t, err)
+	now := time.Date(2026, 11, 2, 15, 0, 0, 0, time.UTC)
+	service := NewService(db, nil)
+	service.now = func() time.Time { return now }
+	err = service.HandleJob(t.Context(), JobTypeSweep, "{}")
+	require.ErrorContains(t, err, "purge YouTube cache", "the fixture must reach the retention failure")
+	var queued []models.Job
+	require.NoError(t, db.NewSelect().Model(&queued).Where("type = ?", JobTypeSweep).Scan(t.Context()))
+	require.Len(t, queued, 1, "a failed retention run must leave a durable successor")
+	require.Equal(t, now.Add(15*time.Minute), queued[0].RunAt.UTC())
+	require.Equal(t, "pending", queued[0].Status)
+}

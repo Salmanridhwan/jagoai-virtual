@@ -1,0 +1,544 @@
+import {
+  DITHER_BUTTON_MAX_CONTRAST,
+  DITHER_BUTTON_MIN_CONTRAST,
+  DITHER_BUTTON_OPACITY,
+  MINIMUM_FOCUS_CONTRAST,
+  MINIMUM_SEMANTIC_ACTION_DISTANCE,
+  MINIMUM_TEXT_CONTRAST,
+  compositeValidationColor,
+  contrastRatio as sharedContrastRatio,
+  oklabDistance,
+  type ThemeValidationRgba,
+} from "@openpost/dither/theme-validation";
+import {
+  ACTION_INTENTS,
+  NATIVE_CANVAS_TREATMENTS,
+  NATIVE_COMPONENT_RECIPE_OPTIONS,
+  NATIVE_ICON_ROLES,
+  NATIVE_MIN_TEXT_SIZE,
+  PUBLICATION_STATUSES,
+  type NativeIconPackId,
+  type NativeActionStyle,
+  type NativeTextRole,
+  type NativeThemeManifest,
+} from "./contract";
+import { BUILTIN_ICON_ROLE_MAPS } from "./icon-packs";
+
+const COLOR_KEYS = [
+  "background",
+  "surface",
+  "surfaceContainer",
+  "surfaceContainerHigh",
+  "onSurface",
+  "onSurfaceVariant",
+  "outline",
+  "outlineVariant",
+  "primary",
+  "onPrimary",
+  "primaryContainer",
+  "onPrimaryContainer",
+  "secondaryContainer",
+  "onSecondaryContainer",
+  "error",
+  "onError",
+  "errorContainer",
+  "onErrorContainer",
+  "success",
+  "onSuccess",
+  "warning",
+  "onWarning",
+  "link",
+  "focus",
+  "scrim",
+  "shadow",
+] as const;
+
+const EDITOR_COLOR_KEYS = [
+  "canvas",
+  "canvasGrid",
+  "canvasSelection",
+  "canvasSelectionText",
+  "transparencyLight",
+  "transparencyDark",
+  "timeline",
+  "timelineTrack",
+  "timelinePlayhead",
+  "waveform",
+  "handle",
+  "safeArea",
+  "mediaScrim",
+] as const;
+
+const TYPOGRAPHY_KEYS = [
+  "displayLarge",
+  "headlineLarge",
+  "titleLarge",
+  "titleMedium",
+  "bodyLarge",
+  "bodyMedium",
+  "bodySmall",
+  "labelLarge",
+  "labelMedium",
+] as const;
+
+type Rgba = readonly [red: number, green: number, blue: number, alpha: number];
+
+export function validateNativeThemeManifest(
+  value: NativeThemeManifest | null | undefined,
+): value is NativeThemeManifest {
+  if (
+    !value ||
+    !boundedText(value.id, 256) ||
+    !boundedText(value.familyId, 256) ||
+    !boundedText(value.displayName, 80) ||
+    (value.scheme !== "light" && value.scheme !== "dark")
+  ) {
+    return false;
+  }
+
+  const colors = value.colors;
+  if (
+    !colors ||
+    COLOR_KEYS.some((key) => !parseNativeColor(colors[key])) ||
+    PUBLICATION_STATUSES.some((status) => !parseNativeColor(colors.status?.[status]))
+  ) {
+    return false;
+  }
+
+  if (
+    !hasReadableContrast(colors.onSurface, colors.background, MINIMUM_TEXT_CONTRAST) ||
+    !hasReadableContrast(colors.onSurface, colors.surface, MINIMUM_TEXT_CONTRAST) ||
+    !hasReadableContrast(colors.onSurfaceVariant, colors.background, MINIMUM_TEXT_CONTRAST) ||
+    !hasReadableContrast(colors.onSurfaceVariant, colors.surface, MINIMUM_TEXT_CONTRAST) ||
+    !hasReadableContrast(colors.primary, colors.onPrimary, MINIMUM_TEXT_CONTRAST) ||
+    !hasReadableContrast(colors.focus, colors.background, MINIMUM_FOCUS_CONTRAST) ||
+    !hasReadableContrast(colors.focus, colors.surface, MINIMUM_FOCUS_CONTRAST) ||
+    PUBLICATION_STATUSES.some(
+      (status) =>
+        !hasReadableContrast(colors.status[status], colors.background, MINIMUM_TEXT_CONTRAST) ||
+        !hasReadableContrast(colors.status[status], colors.surface, MINIMUM_TEXT_CONTRAST),
+    )
+  ) {
+    return false;
+  }
+
+  if (
+    ACTION_INTENTS.some((intent) => {
+      const action = value.actions?.[intent];
+      if (
+        !action ||
+        !parseNativeColor(action.container) ||
+        !parseNativeColor(action.content) ||
+        !parseNativeColor(action.border) ||
+        !parseNativeColor(action.pressedContainer) ||
+        !parseNativeColor(action.pressedContent) ||
+        !parseNativeColor(action.depthColor) ||
+        !boundedNumber(action.borderWidth, 0, 4) ||
+        !boundedNumber(action.depth, 0, 8) ||
+        !boundedNumber(action.disabledOpacity, 0, 1) ||
+        typeof action.underline !== "boolean"
+      ) {
+        return true;
+      }
+      return !hasReadableActionContrast(action, colors.background, colors.surface);
+    })
+  ) {
+    return false;
+  }
+
+  if (!hasDistinctDestructiveAction(value.actions, colors.background, colors.surface)) return false;
+
+  if (EDITOR_COLOR_KEYS.some((key) => !parseNativeColor(value.editor?.[key]))) return false;
+  if (TYPOGRAPHY_KEYS.some((key) => !validTextRole(value.typography?.[key]))) return false;
+
+  const shape = value.shape;
+  if (
+    !shape ||
+    !boundedNumber(shape.extraSmall, 0, 16) ||
+    !boundedNumber(shape.small, shape.extraSmall, 20) ||
+    !boundedNumber(shape.medium, shape.small, 32) ||
+    !boundedNumber(shape.large, shape.medium, 32) ||
+    !boundedNumber(shape.extraLarge, shape.large, 32) ||
+    !boundedNumber(shape.full, shape.extraLarge, 999)
+  ) {
+    return false;
+  }
+
+  const spacing = value.spacing;
+  if (
+    !spacing ||
+    !boundedNumber(spacing.extraSmall, 2, 8) ||
+    !boundedNumber(spacing.small, spacing.extraSmall, 16) ||
+    !boundedNumber(spacing.medium, spacing.small, 20) ||
+    !boundedNumber(spacing.large, spacing.medium, 24) ||
+    !boundedNumber(spacing.extraLarge, spacing.large, 32) ||
+    !boundedNumber(spacing.doubleExtraLarge, spacing.extraLarge, 48)
+  ) {
+    return false;
+  }
+
+  const motion = value.motion;
+  if (
+    !motion ||
+    !boundedNumber(motion.quickMs, 0, 2000) ||
+    !boundedNumber(motion.standardMs, motion.quickMs, 2000) ||
+    !boundedNumber(motion.emphasizedMs, motion.standardMs, 2000)
+  ) {
+    return false;
+  }
+
+  const shell = value.shell;
+  if (
+    !shell ||
+    !boundedNumber(shell.contentMaxWidth, 320, 4096) ||
+    !boundedNumber(shell.sidebarWidth, 160, 1024) ||
+    !boundedNumber(shell.headerHeight, 44, 256) ||
+    !boundedNumber(shell.mobileNavigationHeight, 44, 256) ||
+    !NATIVE_CANVAS_TREATMENTS.some((candidate) => candidate === shell.canvasTreatment)
+  ) {
+    return false;
+  }
+
+  const components = value.components;
+  if (
+    !components ||
+    Object.keys(NATIVE_COMPONENT_RECIPE_OPTIONS).some((key) => {
+      const recipe = key as keyof typeof NATIVE_COMPONENT_RECIPE_OPTIONS;
+      return !NATIVE_COMPONENT_RECIPE_OPTIONS[recipe].some(
+        (candidate) => candidate === components[recipe],
+      );
+    })
+  ) {
+    return false;
+  }
+
+  if (
+    !value.assetSlots ||
+    Object.entries(value.assetSlots).some(
+      ([slot, binding]) =>
+        ![
+          "background-texture",
+          "sidebar-decoration",
+          "header-decoration",
+          "empty-state-illustration",
+          "loading-illustration",
+        ].includes(slot) ||
+        !binding ||
+        !boundedText(binding.resourceId, 256) ||
+        (binding.alt !== undefined && !boundedText(binding.alt, 240)),
+    )
+  ) {
+    return false;
+  }
+
+  const packId = value.iconography?.packId as NativeIconPackId | undefined;
+  const protectedRoleMap = packId ? BUILTIN_ICON_ROLE_MAPS[packId] : undefined;
+  return (
+    Array.isArray(value.decoration?.celebration) &&
+    value.decoration.celebration.length > 0 &&
+    value.decoration.celebration.length <= 12 &&
+    value.decoration.celebration.every((color) => parseNativeColor(color) !== null) &&
+    protectedRoleMap !== undefined &&
+    NATIVE_ICON_ROLES.every((role) => value.iconography?.roles?.[role] === protectedRoleMap[role])
+  );
+}
+
+export function isReadableOnThemeSurfaces(
+  foreground: string,
+  background: string,
+  surface: string,
+): boolean {
+  return (
+    hasReadableContrast(foreground, background, MINIMUM_TEXT_CONTRAST) &&
+    hasReadableContrast(foreground, surface, MINIMUM_TEXT_CONTRAST)
+  );
+}
+
+export function readableThemeForeground(
+  preferred: string,
+  fallback: string,
+  background: string,
+  surface: string,
+): string {
+  if (isReadableOnThemeSurfaces(preferred, background, surface)) return preferred;
+
+  const preferredColor = parseNativeColor(preferred);
+  const fallbackColor = parseNativeColor(fallback);
+  if (
+    !preferredColor ||
+    !fallbackColor ||
+    preferredColor[3] !== 1 ||
+    fallbackColor[3] !== 1 ||
+    !isReadableOnThemeSurfaces(fallback, background, surface)
+  ) {
+    return fallback;
+  }
+
+  let lower = 0;
+  let upper = 1;
+  let result = fallback;
+  for (let iteration = 0; iteration < 16; iteration += 1) {
+    const amount = (lower + upper) / 2;
+    const blend = (index: 0 | 1 | 2) =>
+      preferredColor[index] + (fallbackColor[index] - preferredColor[index]) * amount;
+    const candidate = serializeNativeColor([blend(0), blend(1), blend(2), 1]);
+    if (isReadableOnThemeSurfaces(candidate, background, surface)) {
+      result = candidate;
+      upper = amount;
+    } else {
+      lower = amount;
+    }
+  }
+  return result;
+}
+
+function hasReadableActionContrast(
+  action: NativeActionStyle,
+  background: string,
+  surface: string,
+): boolean {
+  return [background, surface].every(
+    (underlay) =>
+      hasReadableContrastOn(action.content, action.container, underlay, MINIMUM_TEXT_CONTRAST) &&
+      hasReadableContrastOn(
+        action.pressedContent,
+        action.pressedContainer,
+        underlay,
+        MINIMUM_TEXT_CONTRAST,
+      ),
+  );
+}
+
+function hasDistinctDestructiveAction(
+  actions: NativeThemeManifest["actions"],
+  background: string,
+  surface: string,
+): boolean {
+  const destructive = actions.destructive;
+  return (["focal", "primary", "ordinary", "quiet"] as const).every((intent) => {
+    const safe = actions[intent];
+    return [background, surface].every((underlay) => {
+      const containerDistance = perceptualColorDistanceOn(
+        destructive.container,
+        safe.container,
+        underlay,
+      );
+      const contentDistance = perceptualColorDistanceOn(
+        destructive.content,
+        safe.content,
+        underlay,
+      );
+      return (
+        (containerDistance !== null && containerDistance >= MINIMUM_SEMANTIC_ACTION_DISTANCE) ||
+        (contentDistance !== null && contentDistance >= MINIMUM_SEMANTIC_ACTION_DISTANCE)
+      );
+    });
+  });
+}
+
+function hasReadableContrastOn(
+  foreground: string,
+  container: string,
+  underlay: string,
+  minimum: number,
+): boolean {
+  const foregroundColor = parseNativeColor(foreground);
+  const containerColor = parseNativeColor(container);
+  const underlayColor = parseNativeColor(underlay);
+  if (
+    !foregroundColor ||
+    !containerColor ||
+    !underlayColor ||
+    foregroundColor[3] !== 1 ||
+    underlayColor[3] !== 1
+  ) {
+    return false;
+  }
+  return contrastRatio(foregroundColor, compositeColor(containerColor, underlayColor)) >= minimum;
+}
+
+function perceptualColorDistanceOn(first: string, second: string, underlay: string): number | null {
+  const firstColor = parseNativeColor(first);
+  const secondColor = parseNativeColor(second);
+  const underlayColor = parseNativeColor(underlay);
+  if (!firstColor || !secondColor || !underlayColor || underlayColor[3] !== 1) return null;
+  return (
+    oklabDistance(
+      toSharedColor(firstColor),
+      toSharedColor(secondColor),
+      toSharedColor(underlayColor),
+    ) ?? null
+  );
+}
+
+/** Native tuples run 0-255; the shared core runs 0-1. Scale, never re-derive. */
+function toSharedColor([red, green, blue, alpha]: Rgba): ThemeValidationRgba {
+  return { red: red / 255, green: green / 255, blue: blue / 255, alpha };
+}
+
+function fromSharedColor(color: ThemeValidationRgba): Rgba {
+  return [color.red * 255, color.green * 255, color.blue * 255, color.alpha];
+}
+
+function compositeColor(foreground: Rgba, background: Rgba): Rgba {
+  return fromSharedColor(
+    compositeValidationColor(toSharedColor(foreground), toSharedColor(background)),
+  );
+}
+
+function validTextRole(value: NativeTextRole | null | undefined): boolean {
+  if (
+    !value ||
+    !boundedNumber(value.fontSize, NATIVE_MIN_TEXT_SIZE, 64) ||
+    !boundedNumber(value.lineHeight, value.fontSize, value.fontSize * 2.5) ||
+    !boundedNumber(value.letterSpacing, value.fontSize * -0.04, value.fontSize * 0.2) ||
+    !/^[1-9]00$/.test(value.fontWeight)
+  ) {
+    return false;
+  }
+  const hasFamily = value.fontFamily !== undefined;
+  const hasResource = value.fontResourceId !== undefined;
+  return (
+    hasFamily === hasResource &&
+    (!hasFamily || (boundedText(value.fontFamily, 120) && boundedText(value.fontResourceId, 256)))
+  );
+}
+
+function parseNativeColor(value: unknown): Rgba | null {
+  if (value === "transparent") return [0, 0, 0, 0];
+  if (typeof value !== "string") return null;
+
+  const hex = /^#([0-9a-f]{6})([0-9a-f]{2})?$/i.exec(value);
+  if (hex) {
+    return [
+      Number.parseInt(hex[1]!.slice(0, 2), 16),
+      Number.parseInt(hex[1]!.slice(2, 4), 16),
+      Number.parseInt(hex[1]!.slice(4, 6), 16),
+      hex[2] ? Number.parseInt(hex[2], 16) / 255 : 1,
+    ];
+  }
+
+  const rgba =
+    /^rgba\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(0(?:\.\d+)?|1(?:\.0+)?)\s*\)$/i.exec(
+      value,
+    );
+  if (!rgba) return null;
+  const channels = rgba.slice(1, 4).map(Number);
+  if (channels.some((channel) => channel < 0 || channel > 255)) return null;
+  return [channels[0]!, channels[1]!, channels[2]!, Number(rgba[4])];
+}
+
+function serializeNativeColor([red, green, blue, alpha]: Rgba): string {
+  return `#${[red, green, blue, alpha * 255]
+    .map((channel) => Math.round(channel).toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
+function hasReadableContrast(foreground: string, background: string, minimum: number): boolean {
+  const foregroundColor = parseNativeColor(foreground);
+  const backgroundColor = parseNativeColor(background);
+  if (
+    !foregroundColor ||
+    !backgroundColor ||
+    foregroundColor[3] !== 1 ||
+    backgroundColor[3] !== 1
+  ) {
+    return false;
+  }
+  return contrastRatio(foregroundColor, backgroundColor) >= minimum;
+}
+
+function contrastRatio(foreground: Rgba, background: Rgba): number {
+  return sharedContrastRatio(toSharedColor(foreground), toSharedColor(background));
+}
+
+function boundedText(value: unknown, maximumCodePoints: number): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    Array.from(value).length <= maximumCodePoints
+  );
+}
+
+function boundedNumber(value: unknown, minimum: number, maximum: number): value is number {
+  return (
+    typeof value === "number" && Number.isFinite(value) && value >= minimum && value <= maximum
+  );
+}
+
+const DITHER_TARGET_CONTRAST = 1.32;
+const DITHER_MIN_OPACITY_PERCENT = 8;
+const DITHER_MAX_OPACITY_PERCENT = 48;
+
+/** Native controls retain their semantic palette while keeping the two endpoints readable. */
+export function nativeDitherActionMaterial(
+  action: NativeActionStyle,
+  underlay: string,
+  options: { focusColor?: string } = {},
+): { ink: string; opacity: number; content: string; focus: string } | undefined {
+  const base = parseNativeColor(underlay);
+  const container = parseNativeColor(action.container);
+  const foreground = action.content;
+  const content = parseNativeColor(foreground);
+  if (!base || !container || !content || container[3] === 0) return undefined;
+  const background = compositeColor(container, base);
+  let best: { ink: string; opacity: number; content: string; distance: number } | undefined;
+  for (const ink of [foreground, "#000000", "#ffffff"]) {
+    const color = parseNativeColor(ink);
+    if (!color) continue;
+    for (
+      let percent = DITHER_MIN_OPACITY_PERCENT;
+      percent <= DITHER_MAX_OPACITY_PERCENT;
+      percent += 1
+    ) {
+      const opacity = percent / 100;
+      const endpoint = compositeColor([color[0], color[1], color[2], opacity], background);
+      const contrast = contrastRatio(background, endpoint);
+      if (contrast < DITHER_BUTTON_MIN_CONTRAST || contrast > DITHER_BUTTON_MAX_CONTRAST) continue;
+      const fallback =
+        contrastRatio([0, 0, 0, 1], endpoint) >= contrastRatio([255, 255, 255, 1], endpoint)
+          ? "#000000"
+          : "#ffffff";
+      const resolvedContent = readableThemeForeground(
+        foreground,
+        fallback,
+        serializeNativeColor(endpoint),
+        serializeNativeColor(background),
+      );
+      const resolved = parseNativeColor(resolvedContent)!;
+      if (
+        contrastRatio(resolved, endpoint) < MINIMUM_TEXT_CONTRAST ||
+        contrastRatio(resolved, background) < MINIMUM_TEXT_CONTRAST
+      )
+        continue;
+      const distance =
+        Math.abs(contrast - DITHER_TARGET_CONTRAST) +
+        Math.abs(opacity - DITHER_BUTTON_OPACITY) +
+        Math.hypot(resolved[0] - content[0], resolved[1] - content[1], resolved[2] - content[2]) /
+          255;
+      if (!best || distance < best.distance)
+        best = { ink, opacity, content: resolvedContent, distance };
+    }
+  }
+  if (!best) return undefined;
+  const ink = parseNativeColor(best.ink)!;
+  const endpoint = compositeColor([ink[0], ink[1], ink[2], best.opacity], background);
+  const requestedFocus = options.focusColor ?? foreground;
+  const focus = readableThemeForeground(
+    requestedFocus,
+    best.content,
+    serializeNativeColor(endpoint),
+    serializeNativeColor(background),
+  );
+  const resolvedFocus = parseNativeColor(focus)!;
+  return {
+    ink: best.ink,
+    opacity: best.opacity,
+    content: best.content,
+    focus:
+      contrastRatio(resolvedFocus, endpoint) >= MINIMUM_FOCUS_CONTRAST &&
+      contrastRatio(resolvedFocus, background) >= MINIMUM_FOCUS_CONTRAST
+        ? focus
+        : best.content,
+  };
+}

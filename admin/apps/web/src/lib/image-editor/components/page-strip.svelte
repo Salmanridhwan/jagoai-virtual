@@ -1,0 +1,521 @@
+<script lang="ts">
+	import { tick } from 'svelte';
+	import { flip } from 'svelte/animate';
+	import { prefersReducedMotion } from 'svelte/motion';
+	import { useImageEditor } from '../editor.svelte';
+	import { Button } from '$lib/components/ui/button';
+	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+	import { Input } from '$lib/components/ui/input';
+	import { ProtectedIcon, ThemeIcon } from '$lib/themes/icons';
+	import TemplatePreview from './template-preview.svelte';
+	import ImageEditorResizeDialog from './image-editor-resize-dialog.svelte';
+	import { imageEditorPageDimensions } from '../page-dimensions';
+	import { m } from '$lib/paraglide/messages';
+	import type { SelectionPoint } from '../selection';
+	import type { ImageEditorPage } from '../types';
+	import { containsExternalImageDrag, externalFiles } from '../media-drag';
+
+	let {
+		onExternalFiles,
+		compact = false
+	}: {
+		compact?: boolean;
+		onExternalFiles?: (
+			files: File[],
+			point: SelectionPoint,
+			pageID: string
+		) => void | Promise<void>;
+	} = $props();
+
+	const PAGE_DRAG_TYPE = 'application/x-openpost-image-editor-page';
+	const editor = useImageEditor();
+	const expanded = $derived(editor.pagesExpanded && !compact);
+	let draggingID = $state('');
+	let externalDropPageID = $state('');
+	let keyboardDraggingID = $state('');
+	let previewOrder = $state<string[] | null>(null);
+	let previewDocument = $state.raw<typeof editor.document>(null);
+	let reorderAnnouncement = $state('');
+	let insertionPageID = $state('');
+	let editingPageID = $state('');
+	let pageNameDraft = $state('');
+	let pageNameInput = $state<HTMLInputElement | null>(null);
+	let resizePageOpen = $state(false);
+	let strip = $state<HTMLDivElement>();
+	function focusPage(id: string) {
+		void tick().then(() =>
+			strip?.querySelector<HTMLButtonElement>(`[data-page-id="${CSS.escape(id)}"]`)?.focus()
+		);
+	}
+	const hintID = $props.id();
+	const pages = $derived(editor.document?.pages ?? []);
+	const activeIndex = $derived(pages.findIndex((page) => page.id === editor.activePageID));
+	const activePageLabel = $derived(
+		activeIndex >= 0
+			? m.image_editor_page_label({
+					number: activeIndex + 1,
+					name: displayPageName(pages[activeIndex]?.name ?? '', activeIndex)
+				})
+			: m.image_editor_pages()
+	);
+	const displayPages = $derived(
+		previewOrder ? previewOrder.flatMap((id) => pages.find((page) => page.id === id) ?? []) : pages
+	);
+	$effect(() => {
+		if (previewDocument !== editor.document) cancelReorder();
+	});
+	function selectPage(page: ImageEditorPage): void {
+		const changed = editor.activePageID !== page.id;
+		if (changed) editor.clearPixelSelection();
+		editor.activePageID = page.id;
+		editor.selectedLayerIDs = [];
+		if (changed) editor.fitZoom();
+	}
+
+	function beginPageDrag(event: DragEvent, page: ImageEditorPage): void {
+		cancelReorder();
+		draggingID = page.id;
+		if (event.dataTransfer) {
+			event.dataTransfer.clearData();
+			event.dataTransfer.setData(PAGE_DRAG_TYPE, page.id);
+			event.dataTransfer.effectAllowed = 'move';
+		}
+	}
+
+	function endPageDrag(): void {
+		draggingID = '';
+		insertionPageID = '';
+	}
+
+	function cancelReorder() {
+		if (keyboardDraggingID) reorderAnnouncement = m.interaction_reorder_cancelled();
+		keyboardDraggingID = '';
+		previewOrder = null;
+		previewDocument = editor.document;
+	}
+
+	function displayPageName(name: string, index: number): string {
+		return /^Page \d+$/.test(name) ? m.image_editor_default_page_name({ number: index + 1 }) : name;
+	}
+
+	function beginRenamePage(): void {
+		const page = pages.find((candidate) => candidate.id === editor.activePageID);
+		if (!page || !editor.canEdit) return;
+		editingPageID = page.id;
+		pageNameDraft = displayPageName(page.name, activeIndex);
+		void tick().then(() => {
+			pageNameInput?.focus();
+			pageNameInput?.select();
+		});
+	}
+
+	function finishRenamePage(commit: boolean): void {
+		const pageID = editingPageID;
+		const name = pageNameDraft.trim();
+		editingPageID = '';
+		if (!commit || !pageID || !name) return;
+		const page = pages.find((candidate) => candidate.id === pageID);
+		if (!page || page.name === name) return;
+		editor.mutate(m.image_editor_rename_page(), (document) => {
+			const target = document.pages.find((candidate) => candidate.id === pageID);
+			if (target) target.name = name;
+		});
+	}
+
+	function commitPageMove(pageID: string, target: number, announcement: 'moved' | 'dropped'): void {
+		const source = pages.findIndex((page) => page.id === pageID);
+		if (source < 0 || target < 0 || target >= pages.length || source === target) return;
+		const name = displayPageName(pages[source].name, source);
+		editor.reorderPage(pageID, target);
+		reorderAnnouncement =
+			announcement === 'dropped'
+				? m.interaction_reorder_dropped({ name, position: target + 1 })
+				: m.interaction_reorder_moved({
+						name,
+						position: target + 1,
+						total: pages.length
+					});
+		focusPage(pageID);
+	}
+
+	function moveActivePage(delta: -1 | 1): void {
+		const source = pages.findIndex((page) => page.id === editor.activePageID);
+		commitPageMove(editor.activePageID, source + delta, 'moved');
+	}
+
+	function reorderPageFromKeyboard(event: KeyboardEvent, pageID: string, index: number): void {
+		if (!editor.canEdit) return;
+		if (event.key === 'Tab') {
+			cancelReorder();
+			return;
+		}
+		const name = displayPageName(displayPages[index]?.name ?? '', index);
+		if (event.key === ' ' || event.key === 'Enter') {
+			event.preventDefault();
+			event.stopPropagation();
+			if (event.repeat) return;
+			if (keyboardDraggingID === pageID) {
+				const target = previewOrder?.indexOf(pageID) ?? index;
+				cancelReorder();
+				if (pages.findIndex((page) => page.id === pageID) !== target)
+					editor.reorderPage(pageID, target);
+				reorderAnnouncement = m.interaction_reorder_dropped({
+					name,
+					position: target + 1
+				});
+				focusPage(pageID);
+			} else {
+				previewDocument = editor.document;
+				keyboardDraggingID = pageID;
+				previewOrder = pages.map((page) => page.id);
+				reorderAnnouncement = m.interaction_reorder_grabbed({
+					name,
+					position: index + 1,
+					total: pages.length
+				});
+			}
+			return;
+		}
+		if (event.key === 'Escape' && keyboardDraggingID) {
+			event.preventDefault();
+			event.stopPropagation();
+			cancelReorder();
+			reorderAnnouncement = m.interaction_reorder_cancelled();
+			focusPage(pageID);
+			return;
+		}
+		const delta = event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : 0;
+		if (!delta || (!keyboardDraggingID && !event.altKey)) return;
+		event.preventDefault();
+		event.stopPropagation();
+		const target = index + delta;
+		if (target < 0 || target >= pages.length) return;
+		if (!keyboardDraggingID) {
+			commitPageMove(pageID, target, 'moved');
+			return;
+		}
+		const next = [...(previewOrder ?? [])];
+		next.splice(index, 1);
+		next.splice(target, 0, pageID);
+		previewOrder = next;
+		focusPage(pageID);
+		reorderAnnouncement = m.interaction_reorder_moved({
+			name,
+			position: target + 1,
+			total: pages.length
+		});
+	}
+
+	function handlePageDragOver(event: DragEvent, pageID: string): void {
+		event.preventDefault();
+		if (draggingID) {
+			if (draggingID !== pageID) insertionPageID = pageID;
+			if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+			return;
+		}
+		if (!containsExternalImageDrag(event.dataTransfer)) return;
+		externalDropPageID = pageID;
+		if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+	}
+
+	function handlePageDrop(event: DragEvent, pageID: string, index: number): void {
+		event.preventDefault();
+		event.stopPropagation();
+		externalDropPageID = '';
+		insertionPageID = '';
+		if (draggingID) {
+			const pageToMove = draggingID;
+			endPageDrag();
+			commitPageMove(pageToMove, index, 'dropped');
+			return;
+		}
+		const files = externalFiles(event.dataTransfer);
+		if (files.length > 0 && editor.canEdit && editor.document) {
+			const page = pages.find((candidate) => candidate.id === pageID);
+			if (!page) return;
+			selectPage(page);
+			void onExternalFiles?.(
+				files,
+				{
+					x: editor.activePageDimensions.width / 2,
+					y: editor.activePageDimensions.height / 2
+				},
+				pageID
+			);
+			return;
+		}
+	}
+</script>
+
+<svelte:window onblur={() => cancelReorder()} />
+
+<div
+	class="flex size-full flex-col border-t bg-background/95 backdrop-blur"
+	data-testid="image-editor-page-strip"
+>
+	{#snippet pageGrid()}
+		{#if editor.document}
+			{@const gridDocument = editor.document}
+			{#each displayPages as page, index (page.id)}
+				{@const pageSize = imageEditorPageDimensions(gridDocument, page)}
+				<button
+					animate:flip={{ duration: prefersReducedMotion.current ? 0 : 200 }}
+					class:page-grabbed={keyboardDraggingID === page.id}
+					class:page-insertion={insertionPageID === page.id}
+					onblur={(event) => {
+						if (event.relatedTarget && keyboardDraggingID === page.id) cancelReorder();
+					}}
+					data-page-id={page.id}
+					aria-describedby={hintID}
+					type="button"
+					draggable={editor.canEdit}
+					class="flex h-14 w-20 shrink-0 flex-col overflow-hidden rounded-md border bg-card text-left {page.id ===
+					editor.activePageID
+						? 'ring-2 ring-primary'
+						: ''} {externalDropPageID === page.id ? 'bg-primary/10 ring-2 ring-primary' : ''}"
+					onclick={() => selectPage(page)}
+					ondragstart={(event) => beginPageDrag(event, page)}
+					ondragend={endPageDrag}
+					ondragover={(event) => handlePageDragOver(event, page.id)}
+					ondragleave={() => (externalDropPageID = '')}
+					ondrop={(event) => handlePageDrop(event, page.id, index)}
+					onkeydown={(event) => reorderPageFromKeyboard(event, page.id, index)}
+					data-external-drop={externalDropPageID === page.id ? 'active' : undefined}
+					aria-label={`${m.image_editor_page_label({
+						number: index + 1,
+						name: displayPageName(page.name, index)
+					})}, ${pageSize.width} × ${pageSize.height} px`}
+					aria-current={page.id === editor.activePageID ? 'page' : undefined}
+					aria-keyshortcuts="Space Enter ArrowLeft ArrowRight Alt+ArrowLeft Alt+ArrowRight Escape"
+					title={m.interaction_reorder_hint()}
+				>
+					<span class="min-h-0 flex-1 overflow-hidden">
+						<TemplatePreview
+							document={gridDocument}
+							{page}
+							compact
+							cached
+							deferUpdates={editor.colorPreviewActive}
+							dimensionKey={`${pageSize.width}:${pageSize.height}`}
+							label={displayPageName(page.name, index)}
+						/>
+					</span>
+					<span
+						class="flex w-full shrink-0 items-center justify-center border-t px-1 py-0.5 text-[10px] leading-3 tabular-nums"
+						title={displayPageName(page.name, index)}
+					>
+						{index + 1}
+					</span>
+				</button>
+			{/each}
+		{/if}
+	{/snippet}
+	{#snippet pageActionButtons(buttonClass: string)}
+		<Button
+			variant="ghost"
+			size="icon-xs"
+			class={buttonClass}
+			onclick={() => editor.addPage()}
+			disabled={!editor.canEdit}
+		>
+			<ThemeIcon role="add" />
+			<span class="sr-only">{m.image_editor_add_page()}</span>
+		</Button>
+		<Button
+			variant="ghost"
+			size="icon-xs"
+			class={buttonClass}
+			onclick={() => editor.duplicatePage()}
+			disabled={!editor.canEdit}
+		>
+			<ThemeIcon role="copy" />
+			<span class="sr-only">{m.image_editor_duplicate_page()}</span>
+		</Button>
+		<Button
+			variant="ghost"
+			size="icon-xs"
+			class={buttonClass}
+			onclick={() => (resizePageOpen = true)}
+			disabled={!editor.canEdit}
+		>
+			<ProtectedIcon icon="editor-crop" />
+			<span class="sr-only">{m.image_editor_resize_page()}</span>
+		</Button>
+		<Button
+			variant="ghost"
+			size="icon-xs"
+			class={buttonClass}
+			onclick={() => editor.deletePage()}
+			disabled={!editor.canEdit || (editor.document?.pages.length ?? 0) <= 1}
+		>
+			<ThemeIcon role="delete" />
+			<span class="sr-only">{m.image_editor_delete_page()}</span>
+		</Button>
+	{/snippet}
+	{#if expanded}
+		<div class="flex h-8 items-center gap-1 border-b px-2 lg:h-8 [@media(pointer:coarse)]:h-11">
+			<Button
+				variant="ghost"
+				size="icon-xs"
+				class="size-8 md:size-8 lg:size-7 [@media(pointer:coarse)]:size-11"
+				onclick={() => (editor.pagesExpanded = !editor.pagesExpanded)}
+				aria-label={expanded ? m.image_editor_collapse_pages() : m.image_editor_expand_pages()}
+			>
+				<ThemeIcon role={expanded ? 'chevron-down' : 'chevron-up'} />
+			</Button>
+			<span class="sr-only text-sm font-medium text-foreground sm:not-sr-only"
+				>{m.image_editor_pages()}</span
+			>
+			<span class="hidden text-xs text-muted-foreground sm:inline"
+				>{editor.document?.pages.length ?? 0}</span
+			>
+			{#if editingPageID === editor.activePageID}
+				<Input
+					bind:ref={pageNameInput}
+					bind:value={pageNameDraft}
+					class="ml-1 h-7 min-w-0 flex-1 text-xs sm:max-w-52 sm:min-w-28"
+					aria-label={m.image_editor_page_name()}
+					maxlength={120}
+					onblur={() => finishRenamePage(true)}
+					onkeydown={(event) => {
+						event.stopPropagation();
+						if (event.key === 'Enter') {
+							event.preventDefault();
+							finishRenamePage(true);
+							focusPage(editor.activePageID);
+						}
+						if (event.key === 'Escape') {
+							event.preventDefault();
+							finishRenamePage(false);
+							focusPage(editor.activePageID);
+						}
+					}}
+				/>
+			{/if}
+			<div class="ml-auto flex gap-1 sm:hidden">
+				<Button
+					variant="ghost"
+					size="icon-xs"
+					class="size-11"
+					aria-label={m.image_editor_add_page()}
+					onclick={() => editor.addPage()}
+					disabled={!editor.canEdit}><ThemeIcon role="add" /></Button
+				>
+				<Button
+					variant="ghost"
+					size="icon-xs"
+					class="size-11"
+					aria-label={m.image_editor_resize_page()}
+					onclick={() => (resizePageOpen = true)}
+					disabled={!editor.canEdit}><ProtectedIcon icon="editor-crop" /></Button
+				>
+				<DropdownMenu.Root>
+					<DropdownMenu.Trigger>
+						{#snippet child({ props })}
+							<Button
+								{...props}
+								variant="ghost"
+								size="icon-xs"
+								class="size-11"
+								aria-label={m.image_editor_more_actions()}
+								><ThemeIcon role="more-horizontal" /></Button
+							>
+						{/snippet}
+					</DropdownMenu.Trigger>
+					<DropdownMenu.Content align="end">
+						<DropdownMenu.Item
+							class="[@media(pointer:coarse)]:min-h-11"
+							disabled={!editor.canEdit || activeIndex < 0 || Boolean(editingPageID)}
+							onclick={beginRenamePage}>{m.image_editor_rename_page()}</DropdownMenu.Item
+						>
+						<DropdownMenu.Item
+							class="[@media(pointer:coarse)]:min-h-11"
+							disabled={!editor.canEdit || activeIndex <= 0}
+							onclick={() => moveActivePage(-1)}
+							>{m.interaction_reorder_previous()}</DropdownMenu.Item
+						>
+						<DropdownMenu.Item
+							class="[@media(pointer:coarse)]:min-h-11"
+							disabled={!editor.canEdit || activeIndex >= pages.length - 1}
+							onclick={() => moveActivePage(1)}>{m.interaction_reorder_next()}</DropdownMenu.Item
+						>
+						<DropdownMenu.Item
+							class="[@media(pointer:coarse)]:min-h-11"
+							disabled={!editor.canEdit}
+							onclick={() => editor.duplicatePage()}
+							>{m.image_editor_duplicate_page()}</DropdownMenu.Item
+						>
+						<DropdownMenu.Item
+							class="[@media(pointer:coarse)]:min-h-11"
+							disabled={!editor.canEdit || pages.length <= 1}
+							onclick={() => editor.deletePage()}>{m.image_editor_delete_page()}</DropdownMenu.Item
+						>
+					</DropdownMenu.Content>
+				</DropdownMenu.Root>
+			</div>
+			<div class="ml-auto hidden items-center gap-1 sm:flex">
+				<Button
+					variant="ghost"
+					size="icon-xs"
+					class="size-8 lg:size-7 [@media(pointer:coarse)]:size-11"
+					aria-label={m.image_editor_rename_page()}
+					title={m.image_editor_rename_page()}
+					disabled={!editor.canEdit || activeIndex < 0 || Boolean(editingPageID)}
+					onclick={beginRenamePage}
+				>
+					<ThemeIcon role="edit" />
+				</Button>
+
+				{@render pageActionButtons('size-8 md:size-8 lg:size-7 [@media(pointer:coarse)]:size-11')}
+			</div>
+		</div>
+		{#if expanded && editor.document}
+			<div
+				bind:this={strip}
+				class="no-scrollbar flex h-20 shrink-0 items-center gap-2 overflow-x-auto px-3 py-2 lg:h-auto lg:min-h-0 lg:flex-1"
+			>
+				{@render pageGrid()}
+			</div>
+		{/if}
+	{:else}
+		<div
+			class="flex h-[26px] items-center gap-0.5 px-1 [@media(pointer:coarse)]:h-11"
+			data-testid="page-status-row"
+		>
+			<span
+				class="min-w-0 flex-1 truncate text-center font-mono text-[11px] text-muted-foreground tabular-nums"
+				role="status"
+				title={activePageLabel}>{activeIndex + 1}/{pages.length}</span
+			>
+			<Button
+				type="button"
+				variant="ghost"
+				size="icon-xs"
+				class="size-[22px] [@media(pointer:coarse)]:size-11"
+				hidden={compact}
+				aria-label={m.image_editor_expand_pages()}
+				onclick={() => (editor.pagesExpanded = true)}
+			>
+				<ThemeIcon role="chevron-up" />
+			</Button>
+		</div>
+	{/if}
+</div>
+
+<ImageEditorResizeDialog bind:open={resizePageOpen} scope="page" />
+
+<span id={hintID} class="sr-only">{m.interaction_reorder_hint()}</span>
+<span class="sr-only" role="status" aria-live="polite" aria-atomic="true"
+	>{reorderAnnouncement}</span
+>
+
+<style>
+	.page-grabbed {
+		outline: 2px solid var(--primary);
+		outline-offset: 3px;
+		background: var(--muted);
+	}
+	.page-insertion {
+		box-shadow: -6px 0 0 -2px var(--primary);
+	}
+</style>

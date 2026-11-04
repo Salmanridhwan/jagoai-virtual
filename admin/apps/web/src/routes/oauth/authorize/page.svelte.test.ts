@@ -1,0 +1,257 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { render } from 'vitest-browser-svelte';
+import { QueryClient } from '@tanstack/svelte-query';
+import AuthorizePage from './oauth-authorize-page.svelte';
+import type { SocialAccount, Workspace } from '$lib/api/client';
+import '../../layout.css';
+
+function workspace(id: string, name: string): Workspace {
+	return {
+		id,
+		name,
+		role: 'admin',
+		avatar_url: '',
+		can_edit: true,
+		can_connect: true,
+		can_approve: true,
+		color: '',
+		created_at: '2026-01-01T00:00:00Z',
+		organization_id: '',
+		organization_name: '',
+		sso_authenticated: true,
+		sso_identity_linked: true,
+		sso_required: false
+	};
+}
+
+const mocks = (() => {
+	type PageValue = { url: URL };
+	type Subscriber<T> = (value: T) => void;
+
+	const pageValue: PageValue = {
+		url: new URL(
+			'http://localhost/oauth/authorize?response_type=code&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&code_challenge=challenge&code_challenge_method=S256'
+		)
+	};
+	const pageStore = {
+		subscribe(run: Subscriber<PageValue>) {
+			run(pageValue);
+			return () => undefined;
+		}
+	};
+	const authValue = {
+		user: { id: 'user-1' },
+		isLoading: false,
+		isAuthenticated: true
+	};
+	const authStore = {
+		subscribe(run: Subscriber<typeof authValue>) {
+			run(authValue);
+			return () => undefined;
+		}
+	};
+
+	return {
+		goto: vi.fn(),
+		get: vi.fn(),
+		post: vi.fn(),
+		pageValue,
+		pageStore,
+		authStore,
+		workspace: {
+			currentWorkspace: workspace('workspace-1', 'Workspace One'),
+			workspaces: [
+				workspace('workspace-1', 'Workspace One'),
+				workspace('workspace-2', 'Workspace Two'),
+				workspace('workspace-empty', 'Empty Workspace')
+			]
+		}
+	};
+})();
+
+function renderAuthorizePage() {
+	return render(AuthorizePage, {
+		dependencies: {
+			page: mocks.pageStore,
+			auth: mocks.authStore,
+			workspace: mocks.workspace,
+			get: mocks.get,
+			post: mocks.post,
+			cache: new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+			navigate: mocks.goto
+		}
+	});
+}
+
+function deferred<T>() {
+	let resolve!: (value: T) => void;
+	const promise = new Promise<T>((resolvePromise) => {
+		resolve = resolvePromise;
+	});
+	return { promise, resolve };
+}
+
+describe('OAuth authorization request validation', () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		mocks.pageValue.url = new URL(
+			'http://localhost/oauth/authorize?response_type=code&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&code_challenge=challenge&code_challenge_method=S256'
+		);
+	});
+
+	it('disables denial when the request has no client ID', async () => {
+		const screen = await renderAuthorizePage();
+
+		await expect
+			.element(screen.getByText('This OAuth request is missing a client ID.'))
+			.toBeVisible();
+		await expect.element(screen.getByRole('button', { name: 'Deny' })).toBeDisabled();
+		expect(mocks.post).not.toHaveBeenCalled();
+	});
+
+	it('reviews Grok metadata clients as MCP when they request the advertised REST scopes too', async () => {
+		const url = new URL('http://localhost/oauth/authorize');
+		url.search = new URLSearchParams({
+			response_type: 'code',
+			client_id: 'https://grok.com/oauth/mcp-client.json',
+			redirect_uri: 'https://grok.com/connectors-oauth-exchange-code/',
+			scope:
+				'mcp:read mcp:full accounts:read drafts:write events:subscribe media:read media:write publications:cancel publications:publish publications:read publications:schedule workspace:read',
+			code_challenge: '3rgf7n37A6IgrmPpqiynur2As3KRmee9Zl1gtrIEXRg',
+			code_challenge_method: 'S256',
+			resource: 'http://localhost/mcp'
+		}).toString();
+		mocks.pageValue.url = url;
+		mocks.get.mockImplementation(async (path) =>
+			path === '/external-applications/oauth/request'
+				? {
+						data: undefined,
+						error: { detail: 'invalid external application client' },
+						response: new Response(null, { status: 400 })
+					}
+				: { data: [], error: undefined, response: new Response(null, { status: 200 }) }
+		);
+		mocks.post.mockResolvedValue({ data: undefined, error: { detail: 'stop redirect' } });
+
+		const screen = await renderAuthorizePage();
+		await expect
+			.element(screen.getByRole('heading', { name: 'Authorize OpenPost MCP' }))
+			.toBeVisible();
+		await expect
+			.element(screen.getByText('accounts:read', { exact: true }))
+			.not.toBeInTheDocument();
+		await screen.getByRole('button', { name: 'Authorize' }).click();
+		expect(mocks.post).toHaveBeenCalledWith('/mcp/oauth/authorize', {
+			body: expect.objectContaining({
+				client_id: 'https://grok.com/oauth/mcp-client.json',
+				redirect_uri: 'https://grok.com/connectors-oauth-exchange-code/',
+				scope: 'mcp:read mcp:full',
+				workspace_id: 'workspace-1'
+			})
+		});
+	});
+
+	it('authorizes every eligible current workspace when selected', async () => {
+		mocks.pageValue.url = new URL(
+			'http://localhost/oauth/authorize?response_type=code&client_id=op_app_1&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&scope=workspace%3Aread+accounts%3Aread&code_challenge=challenge&code_challenge_method=S256'
+		);
+		mocks.get.mockImplementation(async (path, options) => {
+			if (path === '/external-applications/oauth/request') {
+				return { data: { application: { name: 'Workflow app' } }, error: undefined };
+			}
+			const workspaceID = options?.params?.query?.workspace_id;
+			if (workspaceID === 'workspace-empty') return { data: [], error: undefined };
+			const account: Pick<SocialAccount, 'id' | 'account_username' | 'platform' | 'is_active'> &
+				Partial<Pick<SocialAccount, 'account_avatar_url'>> = {
+				id: `account-${workspaceID}`,
+				account_username: `account-${workspaceID}`,
+				platform: 'x',
+				is_active: true
+			};
+			// Only the first workspace carries a photo; its consent row must render it.
+			if (workspaceID === 'workspace-1') {
+				account.account_avatar_url = 'https://example.com/photo.png';
+			}
+			return {
+				data: [account],
+				error: undefined
+			};
+		});
+		mocks.post.mockResolvedValue({ data: undefined, error: { detail: 'stop redirect' } });
+
+		const screen = await renderAuthorizePage();
+		await expect.element(screen.getByText('Workflow app', { exact: true })).toBeVisible();
+		await screen.getByText('Select all eligible workspaces').click();
+		await expect.element(screen.getByText('account-workspace-2')).toBeVisible();
+		// The consent row shows the caller-supplied photo; the grant payload below stays identical.
+		const photoRow = screen
+			.getByText('account-workspace-1', { exact: true })
+			.element()
+			.closest('label');
+		if (!photoRow) throw new Error('Consent account row is unavailable');
+		expect(photoRow.querySelector('img[src="https://example.com/photo.png"]')).not.toBeNull();
+		await expect.element(screen.getByText('Empty Workspace')).toBeVisible();
+		await screen.getByRole('button', { name: 'Authorize' }).click();
+
+		expect(mocks.post).toHaveBeenCalledWith('/external-applications/oauth/authorize', {
+			body: expect.objectContaining({
+				workspace_grants: [
+					expect.objectContaining({
+						workspace_id: 'workspace-1',
+						account_ids: ['account-workspace-1']
+					}),
+					expect.objectContaining({
+						workspace_id: 'workspace-2',
+						account_ids: ['account-workspace-2']
+					}),
+					expect.objectContaining({
+						workspace_id: 'workspace-empty',
+						account_ids: []
+					})
+				]
+			})
+		});
+	});
+
+	it('blocks approval until every selected workspace account list is loaded', async () => {
+		mocks.pageValue.url = new URL(
+			'http://localhost/oauth/authorize?response_type=code&client_id=op_app_1&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&scope=workspace%3Aread+accounts%3Aread&code_challenge=challenge&code_challenge_method=S256'
+		);
+		let resolveAccounts: ((value: { data: never[]; error: undefined }) => void) | undefined;
+		mocks.get.mockImplementation(async (path) => {
+			if (path === '/external-applications/oauth/request') {
+				return { data: { application: { name: 'Workflow app' } }, error: undefined };
+			}
+			return new Promise((resolve) => {
+				resolveAccounts = resolve;
+			});
+		});
+
+		const screen = await renderAuthorizePage();
+		await expect.element(screen.getByText('Workflow app', { exact: true })).toBeVisible();
+		await expect.element(screen.getByRole('button', { name: 'Authorize' })).toBeDisabled();
+		expect(mocks.post).not.toHaveBeenCalled();
+
+		resolveAccounts?.({ data: [], error: undefined });
+		await expect.element(screen.getByRole('button', { name: 'Authorize' })).toBeEnabled();
+	});
+
+	it('does not submit a second authorization while the first request is pending', async () => {
+		mocks.pageValue.url = new URL(
+			'http://localhost/oauth/authorize?response_type=code&client_id=executor.sh&redirect_uri=https%3A%2F%2Fexecutor.sh%2Fcallback&scope=mcp%3Afull&code_challenge=challenge&code_challenge_method=S256'
+		);
+		const post = deferred<{ data: undefined; error: { detail: string } }>();
+		mocks.post.mockReturnValue(post.promise);
+
+		const screen = await renderAuthorizePage();
+		const authorize = screen.getByRole('button', { name: /Authoriz/ });
+		await authorize.click();
+		await expect.element(authorize).toBeDisabled();
+
+		authorize.element().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		expect(mocks.post).toHaveBeenCalledTimes(1);
+
+		post.resolve({ data: undefined, error: { detail: 'Authorization failed.' } });
+		await expect.element(screen.getByText('Authorization failed.')).toBeVisible();
+	});
+});

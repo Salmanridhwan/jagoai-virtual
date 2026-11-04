@@ -8,6 +8,3 @@ tenant/*/keluaran/
 
 # rahasia tumpukan studio
 .env.openpost
-
-# sumber OpenPost (AGPL-3.0), disalin untuk diubah lokal, tidak masuk git
-openpost/

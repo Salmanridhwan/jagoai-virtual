@@ -1,0 +1,397 @@
+<script lang="ts">
+	import { appBranding } from '$lib/app-branding.svelte';
+	import { onDestroy } from 'svelte';
+	import { get } from 'svelte/store';
+	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
+	import { resolve } from '$app/paths';
+	import { resolveAppPath } from '$lib/app-path';
+	import InlineNotice from '$lib/components/inline-notice.svelte';
+	import PageContainer from '$lib/components/page-container.svelte';
+	import SettingsNavigation from '$lib/components/settings-navigation.svelte';
+	import WorkspaceDeleteDialog from '$lib/components/workspace-delete-dialog.svelte';
+	import { Button } from '$lib/components/ui/button';
+	import { m } from '$lib/paraglide/messages';
+	import {
+		getSettingsDestination,
+		normalizeSettingsTab,
+		settingsTabRedirect,
+		type SettingsTabID
+	} from '$lib/settings-navigation';
+	import {
+		getSettingsInitialLoadPlan,
+		provideSettingsInitialLoadBoundary
+	} from '$lib/settings-initial-load.svelte';
+	import { auth } from '$lib/stores/auth';
+	import { workspaceCtx } from '$lib/stores/workspace.svelte';
+	import { showToast } from '$lib/toast';
+
+	const settingsPanelLoaders = {
+		profile: () => import('$lib/components/settings/ProfileSettingsTab.svelte'),
+		notifications: () => import('$lib/components/notification-preferences.svelte'),
+		security: () => import('$lib/components/settings/SecuritySettingsTab.svelte'),
+		developer: () => import('$lib/components/settings/DeveloperSettingsTab.svelte'),
+		general: () => import('$lib/components/settings/WorkspacePreferencesSettings.svelte'),
+		brand: () => import('$lib/components/settings/BrandSettingsTab.svelte'),
+		'app-branding': () => import('$lib/components/settings/AppBrandingSettings.svelte'),
+		appearance: () => import('$lib/components/themes/appearance-settings.svelte'),
+		accounts: () => import('$lib/components/account-management.svelte'),
+		reposts: () => import('$lib/components/repost-automation-settings.svelte'),
+		schedule: () => import('$lib/components/settings/ScheduleSettingsTab.svelte'),
+		members: () => import('$lib/components/workspace-team-settings.svelte'),
+		plan: () => import('$lib/components/settings/BillingSettingsTab.svelte'),
+		sso: () => import('$lib/components/organization-sso-settings.svelte'),
+		audit: () => import('$lib/components/organization-audit-settings.svelte'),
+		ownership: () => import('$lib/components/organization-ownership-settings.svelte'),
+		instance: () => import('$lib/components/settings/InstanceSettingsTab.svelte'),
+		configuration: () => import('$lib/components/instance-configuration.svelte'),
+		'ai-prompts': () => import('$lib/components/instance-ai-prompts.svelte'),
+		users: () => import('$lib/components/instance-admin-users.svelte'),
+		'instance-audit': () => import('$lib/components/organization-audit-settings.svelte')
+	} satisfies Record<SettingsTabID, () => Promise<object>>;
+
+	type SettingsPanels = {
+		[Key in keyof typeof settingsPanelLoaders]?: Awaited<
+			ReturnType<(typeof settingsPanelLoaders)[Key]>
+		>;
+	};
+	let panels = $state.raw<SettingsPanels>({});
+	let panelFailure = $state<{ tab: SettingsTabID; message: string } | null>(null);
+	const pendingPanels = new Set<SettingsTabID>();
+	const authState = $derived($auth);
+	// Hosted (Paddle) billing has no meaning on self-hosted instances: the
+	// server only renders the openpost-edition meta tag for cloud, so its
+	// absence means this is self-hosted and the Plan & usage tab stays hidden.
+	// Default to visible during SSR so hosted renders do not flash.
+	const showHostedBilling =
+		typeof document === 'undefined' ||
+		document.querySelector('meta[name="openpost-edition"]')?.getAttribute('content') === 'cloud';
+	const activeSettingsTab = $derived(
+		normalizeSettingsTab(
+			page.url.searchParams.get('tab') || page.url.hash.replace(/^#/, '') || null,
+			Boolean(authState.user?.is_admin),
+			showHostedBilling
+		)
+	);
+	// Accounts and Reposts live outside Settings now; old links redirect.
+	const activeTabRedirect = $derived(settingsTabRedirect(activeSettingsTab, page.url));
+	$effect(() => {
+		if (activeTabRedirect) void goto(resolveAppPath(activeTabRedirect), { replaceState: true });
+	});
+	const panelError = $derived(panelFailure?.tab === activeSettingsTab ? panelFailure.message : '');
+
+	$effect(() => {
+		const tab = activeSettingsTab;
+		if (activeTabRedirect) return;
+		// The Brand page shows the brand kit and app branding together.
+		const tabs: SettingsTabID[] = tab === 'brand' ? ['brand', 'app-branding'] : [tab];
+		for (const entry of tabs) {
+			if (panels[entry] || pendingPanels.has(entry) || panelError) continue;
+			pendingPanels.add(entry);
+			void settingsPanelLoaders[entry]()
+				.then((module) => {
+					if (active) panels = { ...panels, [entry]: module };
+				})
+				.catch(() => {
+					if (active) panelFailure = { tab, message: m.settings_panel_load_failed() };
+				})
+				.finally(() => {
+					pendingPanels.delete(entry);
+				});
+		}
+	});
+
+	let destructiveDialogOpen = $state(false);
+	let workspaceDeletionRequestSequence = 0;
+	let active = true;
+
+	onDestroy(() => {
+		active = false;
+		workspaceDeletionRequestSequence += 1;
+	});
+
+	const activeSettingsDestination = $derived(getSettingsDestination(activeSettingsTab));
+	const settingsLoadingVariant = $derived(activeSettingsDestination.loadingVariant);
+	const workspaceSettingsRequired = $derived(
+		activeSettingsTab === 'general' || activeSettingsTab === 'schedule'
+	);
+	const settingsInitialLoadPlan = $derived(
+		getSettingsInitialLoadPlan(activeSettingsTab, {
+			userID: authState.user?.id ?? '',
+			workspaceID: workspaceCtx.currentWorkspace?.id ?? '',
+			organizationID: workspaceCtx.currentWorkspace?.organization_id ?? '',
+			preferredOrganizationID: page.url.searchParams.get('organization') ?? '',
+			canEditQueue: workspaceCtx.currentWorkspace?.can_edit ?? false
+		})
+	);
+	const settingsInitialLoad = provideSettingsInitialLoadBoundary(() => settingsInitialLoadPlan);
+	const workspaceSettingsInitialLoading = $derived(
+		workspaceSettingsRequired &&
+			!workspaceCtx.settingsError &&
+			(!workspaceCtx.currentWorkspace || workspaceCtx.settingsLoading)
+	);
+	const settingsLoading = $derived(
+		!panelError &&
+			(!panels[activeSettingsTab] || workspaceSettingsInitialLoading || settingsInitialLoad.loading)
+	);
+
+	$effect.pre(() => settingsInitialLoad.activate(settingsInitialLoadPlan));
+
+	async function refreshMembershipBootstrap() {
+		const actorID = authState.user?.id ?? '';
+		const projection = auth.captureUserProjection(actorID);
+		if (!projection) return;
+		const bootstrap = await workspaceCtx.loadWorkspaces();
+		if (authState.user?.id === actorID) auth.projectBootstrap(bootstrap, projection);
+	}
+
+	async function deleteCurrentWorkspace(
+		workspaceID: string,
+		confirmation: {
+			confirmName: string;
+			currentPassword: string;
+			reauthGrant?: string;
+		}
+	) {
+		const actorID = get(auth).user?.id ?? '';
+		if (!actorID) return false;
+		const requestSequence = ++workspaceDeletionRequestSequence;
+		const isCurrentRequest = () =>
+			active &&
+			requestSequence === workspaceDeletionRequestSequence &&
+			get(auth).user?.id === actorID;
+		const projected = await workspaceCtx.deleteWorkspace(workspaceID, confirmation);
+		if (!projected) return false;
+		showToast(m.workspace_delete_success());
+		// Deleting the current workspace shrinks the workspace list, which flips the
+		// layout's workspace access key and remounts this page through its onboarding
+		// loading gate before this continuation resumes. The remount clears `active`,
+		// so a remounted page that still shows the deleted workspace must navigate
+		// home. A user who navigated elsewhere mid-flight is left alone.
+		const showingDeletedWorkspace =
+			page.url.pathname === resolveAppPath('/settings') &&
+			page.url.searchParams.get('workspace') === workspaceID;
+		if (!isCurrentRequest() && !showingDeletedWorkspace) return false;
+		await goto(resolve('/'));
+		return true;
+	}
+</script>
+
+<svelte:head>
+	<title>{appBranding.title(m.settings_page_title())}</title>
+</svelte:head>
+
+<div class="settings-page">
+	<PageContainer
+		title={m.sidebar_settings()}
+		themeIconRole="settings"
+		loading={settingsLoading}
+		loadingMessage={workspaceSettingsInitialLoading
+			? m.settings_loading_workspace()
+			: m.common_loading()}
+		loadingLayout="settings"
+		loadingVariant={settingsLoadingVariant}
+		loadingItems={8}
+		mountWhileLoading
+	>
+		{#snippet navigation()}
+			<SettingsNavigation
+				active={activeSettingsTab}
+				showInstance={Boolean(authState.user?.is_admin)}
+				{showHostedBilling}
+			/>
+		{/snippet}
+		<div class="min-w-0 space-y-8">
+			{#if panelError}
+				<InlineNotice tone="error" message={panelError}>
+					{#snippet actions()}
+						<Button variant="outline" size="sm" onclick={() => window.location.reload()}
+							>{m.common_refresh()}</Button
+						>
+					{/snippet}
+				</InlineNotice>
+			{:else if workspaceSettingsRequired && workspaceCtx.settingsError && activeSettingsTab !== 'audit'}
+				<InlineNotice tone="error" message={m.settings_workspace_load_failed()}>
+					{#snippet actions()}
+						<Button variant="outline" size="sm" onclick={() => void workspaceCtx.loadSettings()}>
+							{m.common_retry()}</Button
+						>
+					{/snippet}
+				</InlineNotice>
+			{:else}
+				<div class="min-w-0 space-y-8">
+					{#if workspaceSettingsRequired && workspaceCtx.settingsBackgroundError}
+						<InlineNotice tone="warning" message={m.settings_workspace_load_failed()}>
+							{#snippet actions()}
+								<Button
+									variant="outline"
+									size="sm"
+									onclick={() => void workspaceCtx.loadSettings()}
+								>
+									{m.common_retry()}
+								</Button>
+							{/snippet}
+						</InlineNotice>
+					{/if}
+
+					<div class="max-w-5xl min-w-0 space-y-6">
+						{#if activeSettingsTab === 'profile'}
+							{#if panels['profile']}
+								{@const ProfileSettingsTab = panels['profile'].default}
+								<ProfileSettingsTab />
+							{/if}
+						{:else if activeSettingsTab === 'notifications'}
+							{#if panels['notifications']}
+								{@const NotificationPreferences = panels['notifications'].default}
+								<NotificationPreferences
+									workspaceID={workspaceCtx.currentWorkspace?.id ?? ''}
+									workspaceName={workspaceCtx.currentWorkspace?.name ?? ''}
+									canEditQueue={workspaceCtx.currentWorkspace?.can_edit ?? false}
+								/>
+							{/if}
+						{:else if activeSettingsTab === 'security'}
+							{#if panels['security']}
+								{@const SecuritySettingsTab = panels['security'].default}
+								<SecuritySettingsTab />
+							{/if}
+						{:else if activeSettingsTab === 'developer'}
+							{#if panels['developer']}
+								{@const DeveloperSettingsTab = panels['developer'].default}
+								<DeveloperSettingsTab />
+							{/if}
+						{:else if activeSettingsTab === 'general'}
+							{#if panels['general']}
+								{@const WorkspacePreferencesSettings = panels['general'].default}
+								<WorkspacePreferencesSettings onDelete={() => (destructiveDialogOpen = true)} />
+							{/if}
+						{:else if activeSettingsTab === 'brand'}
+							{#if panels['brand'] && panels['app-branding']}
+								{@const BrandSettingsTab = panels['brand'].default}
+								{@const AppBrandingSettings = panels['app-branding'].default}
+								<div class="space-y-10">
+									<BrandSettingsTab workspaceID={workspaceCtx.currentWorkspace?.id ?? ''} active />
+									<AppBrandingSettings workspaceOnly />
+								</div>
+							{/if}
+						{:else if activeSettingsTab === 'appearance'}
+							{#if panels['appearance']}
+								{@const ThemeAppearanceSettings = panels['appearance'].default}
+								<ThemeAppearanceSettings />
+							{/if}
+						{:else if activeSettingsTab === 'schedule'}
+							{#if panels['schedule']}
+								{@const ScheduleSettingsTab = panels['schedule'].default}
+								<ScheduleSettingsTab />
+							{/if}
+						{:else if activeSettingsTab === 'members'}
+							{#if panels['members']}
+								{@const WorkspaceTeamSettings = panels['members'].default}
+								<WorkspaceTeamSettings
+									workspaceID={workspaceCtx.currentWorkspace?.id ?? ''}
+									organizationID={workspaceCtx.currentWorkspace?.organization_id ?? ''}
+									currentUserID={authState.user?.id ?? ''}
+									active
+									onMembershipChanged={refreshMembershipBootstrap}
+								/>
+							{/if}
+						{:else if activeSettingsTab === 'plan'}
+							{#if panels['plan']}
+								{@const BillingSettingsTab = panels['plan'].default}
+								<BillingSettingsTab />
+							{/if}
+						{:else if activeSettingsTab === 'sso'}
+							{#if panels['sso']}
+								{@const OrganizationSSOSettings = panels['sso'].default}
+								<OrganizationSSOSettings
+									organizationID={workspaceCtx.currentWorkspace?.organization_id ?? ''}
+									active
+								/>
+							{/if}
+						{:else if activeSettingsTab === 'audit'}
+							{#if panels['audit']}
+								{@const OrganizationAuditSettings = panels['audit'].default}
+								<OrganizationAuditSettings
+									organizationID={workspaceCtx.currentWorkspace?.organization_id ?? ''}
+									active
+								/>
+							{/if}
+						{:else if activeSettingsTab === 'ownership'}
+							{#if panels['ownership']}
+								{@const OrganizationOwnershipSettings = panels['ownership'].default}
+								<OrganizationOwnershipSettings
+									preferredOrganizationID={page.url.searchParams.get('organization') ?? ''}
+									currentUserID={authState.user?.id ?? ''}
+									active
+									onDeleted={() => goto(resolve('/'))}
+								/>
+							{/if}
+						{:else if authState.user?.is_admin && activeSettingsTab === 'instance'}
+							{#if panels['instance']}
+								{@const InstanceSettingsTab = panels['instance'].default}
+								<InstanceSettingsTab userID={authState.user?.id ?? ''} active />
+							{/if}
+						{:else if authState.user?.is_admin && activeSettingsTab === 'configuration'}
+							{#if panels['configuration']}
+								{@const InstanceConfiguration = panels['configuration'].default}
+								<InstanceConfiguration active />
+							{/if}
+						{:else if authState.user?.is_admin && activeSettingsTab === 'ai-prompts'}
+							{#if panels['ai-prompts']}
+								{@const InstanceAIPrompts = panels['ai-prompts'].default}
+								<InstanceAIPrompts active />
+							{/if}
+						{:else if authState.user?.is_admin && activeSettingsTab === 'users'}
+							{#if panels['users']}
+								{@const InstanceAdminUsers = panels['users'].default}
+								<InstanceAdminUsers />
+							{/if}
+						{:else if authState.user?.is_admin && activeSettingsTab === 'instance-audit'}
+							{#if panels['instance-audit']}
+								{@const OrganizationAuditSettings = panels['instance-audit'].default}
+								<OrganizationAuditSettings organizationID="" active instanceWide />
+							{/if}
+						{/if}
+					</div>
+				</div>
+			{/if}
+		</div>
+	</PageContainer>
+</div>
+
+<WorkspaceDeleteDialog
+	bind:open={destructiveDialogOpen}
+	workspaceID={workspaceCtx.currentWorkspace?.id ?? ''}
+	workspaceName={workspaceCtx.currentWorkspace?.name ?? ''}
+	hasPassword={Boolean(authState.user?.password_usable)}
+	onConfirm={deleteCurrentWorkspace}
+/>
+
+<style>
+	/* Desktop: a left rail beside the panel. The rail stays mounted outside the
+	   content loading boundary, so it remains usable while a panel loads. The
+	   breakpoint matches the navigation's rail switch: below it the app sidebar
+	   plus a rail would leave the panel too narrow. */
+	@media (min-width: 64rem) {
+		.settings-page :global([data-slot='page-container']) {
+			display: grid;
+			grid-template-columns: 14rem minmax(0, 1fr);
+			grid-template-areas:
+				'header header'
+				'nav content';
+			column-gap: 2.5rem;
+			align-items: start;
+		}
+
+		.settings-page :global([data-slot='page-header']) {
+			grid-area: header;
+		}
+
+		.settings-page :global([data-slot='page-navigation']) {
+			grid-area: nav;
+		}
+
+		.settings-page :global([data-slot='page-content']) {
+			grid-area: content;
+		}
+	}
+</style>

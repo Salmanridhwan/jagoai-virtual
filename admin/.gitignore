@@ -1,0 +1,8 @@
+node_modules/
+dist/
+build/
+apps/web/build/
+apps/server/cmd/openpost/public/
+.env
+.dev.vars
+*.log

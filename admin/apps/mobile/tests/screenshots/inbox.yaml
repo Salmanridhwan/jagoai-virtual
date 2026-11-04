@@ -1,0 +1,77 @@
+appId: com.openpost.app
+---
+# Uses only tests/screenshots/entry.js sample data, never a live provider.
+- openLink: openpost:///inbox
+- runFlow: open-link-guard.yaml
+- runFlow:
+    when:
+      visible: "Open in.*OpenPost.*"
+    commands:
+      - tapOn: Open
+- runFlow: settings-guard.yaml
+- extendedWaitUntil:
+    visible: Chats
+    timeout: 20000
+- assertVisible: Activity
+- tapOn: Chats
+- assertVisible: Alex Morgan.*
+- waitForAnimationToEnd
+- takeScreenshot: inbox-${SCHEME}
+- tapOn: Alex Morgan.*
+- extendedWaitUntil:
+    visible: ".*alex.bsky.social.*"
+    timeout: 20000
+- tapOn: ".*Message.*"
+- inputText: The launch update is ready.
+- assertVisible: Send
+- assertVisible: The launch update is ready.
+- takeScreenshot: chat-keyboard-${SCHEME}
+- tapOn: Send
+- hideKeyboard
+- runFlow: settings-guard.yaml
+- extendedWaitUntil:
+    visible: The launch update is ready.
+    timeout: 20000
+- assertVisible: ".*Queued.*"
+- waitForAnimationToEnd
+- takeScreenshot: chat-${SCHEME}
+- openLink: openpost:///inbox
+- runFlow: open-link-guard.yaml
+- tapOn: Activity
+- tapOn: Comments
+- extendedWaitUntil:
+    visible: ".*The new workspace looks great.*"
+    timeout: 20000
+- waitForAnimationToEnd
+- takeScreenshot: comments-${SCHEME}
+- tapOn: ".*The new workspace looks great.*"
+- assertVisible: Original post
+- assertVisible: Reply publicly
+- assertVisible: "Public reply to Alex Morgan, as.*"
+- waitForAnimationToEnd
+- takeScreenshot: comment-${SCHEME}
+- openLink: openpost:///inbox
+- runFlow: open-link-guard.yaml
+- tapOn: Activity
+- tapOn: Mentions
+- assertVisible: ".*Thanks for sharing the launch.*"
+- tapOn: ".*Thanks for sharing the launch.*"
+- assertVisible: Incoming mention
+- takeScreenshot: mention-${SCHEME}
+- openLink: openpost:///inbox
+- runFlow: open-link-guard.yaml
+- tapOn: Activity
+- tapOn: Reviews
+- assertVisible: ".*Anonymous reviewer.*"
+- tapOn: ".*Anonymous reviewer.*"
+- assertVisible: Business review
+- assertVisible: "Rating: 5/5"
+- assertVisible: "Google moderation: Pending review"
+- assertVisible: Remove your reply
+- takeScreenshot: review-${SCHEME}
+- openLink: openpost:///media
+- runFlow: open-link-guard.yaml
+- assertVisible: Images
+- assertVisible: lisbon-tram.png
+- waitForAnimationToEnd
+- takeScreenshot: media-${SCHEME}

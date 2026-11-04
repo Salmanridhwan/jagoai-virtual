@@ -1,0 +1,383 @@
+package workflows
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/openpost/backend/internal/services/organizationguard"
+	"github.com/openpost/backend/internal/services/workspaceaccess"
+	"github.com/uptrace/bun"
+)
+
+func (s *Service) Start(ctx context.Context, actor workspaceaccess.ActorFacts, workspaceID, id, mode string, source map[string]any, expected int) (Run, error) {
+	level := workspaceaccess.LevelEdit
+	if mode == ModeLive {
+		level = workspaceaccess.LevelAdminister
+	}
+	authority, err := s.authorize(ctx, actor, workspaceID, level)
+	if err != nil {
+		return Run{}, err
+	}
+	if mode != ModeLive && mode != ModePreview {
+		return Run{}, invalid("choose preview or live execution")
+	}
+	record, err := s.loadWorkflow(ctx, workspaceID, id)
+	if err != nil {
+		return Run{}, err
+	}
+	if record.Revision != expected {
+		return Run{}, ErrConflict
+	}
+	item, err := decodeWorkflow(record)
+	if err != nil {
+		return Run{}, err
+	}
+	if err := Validate(item.Definition, true); err != nil {
+		return Run{}, err
+	}
+	data, err := json.Marshal(source)
+	if err != nil || len(data) > 64*1024 {
+		return Run{}, invalid("sample is too large")
+	}
+	return s.admitRun(ctx, record, item.Definition, authority, mode, source, nil)
+}
+
+func (s *Service) admitRun(ctx context.Context, record workflowRecord, definition Definition, authority workspaceaccess.StoredAuthority, mode string, source map[string]any, prepared *StepResult) (Run, error) {
+	workspaceID := record.WorkspaceID
+	var run runRecord
+	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if err := organizationguard.LockWorkspace(ctx, tx, workspaceID); err != nil {
+			return err
+		}
+		count, err := tx.NewSelect().Model((*runRecord)(nil)).Where("workspace_id = ? AND state IN (?)", workspaceID, bun.List([]string{StateQueued, StateRunning, StateWaiting, StateApproval})).Count(ctx)
+		if err != nil {
+			return err
+		}
+		if count >= maxActiveRuns {
+			return invalid("workspace has reached 1000 active workflow runs")
+		}
+		var createErr error
+		run, createErr = s.createRun(ctx, tx, record, definition, authority, mode, source)
+		if createErr == nil && prepared != nil {
+			encoded, err := json.Marshal([]StepResult{*prepared})
+			if err != nil {
+				return err
+			}
+			run.ResultsJSON = string(encoded)
+			_, createErr = tx.NewUpdate().Model(&run).Column("results_json").WherePK().Exec(ctx)
+		}
+		return createErr
+	})
+	if err != nil {
+		return Run{}, err
+	}
+	return decodeRun(run)
+}
+
+func (s *Service) createRun(ctx context.Context, db bun.IDB, workflow workflowRecord, def Definition, authority workspaceaccess.StoredAuthority, mode string, source map[string]any) (runRecord, error) {
+	now := time.Now().UTC()
+	definitionJSON, err := json.Marshal(def)
+	if err != nil {
+		return runRecord{}, err
+	}
+	authorityJSON, err := json.Marshal(authority)
+	if err != nil {
+		return runRecord{}, err
+	}
+	sourceJSON, err := json.Marshal(source)
+	if err != nil {
+		return runRecord{}, err
+	}
+	stepsJSON, err := json.Marshal(def.Steps)
+	if err != nil {
+		return runRecord{}, err
+	}
+	revision := workflow.Revision
+	if workflow.PublishedRevision > 0 && workflow.PublishedJSON == string(definitionJSON) {
+		revision = workflow.PublishedRevision
+	}
+	record := runRecord{ID: uuid.NewString(), WorkflowID: workflow.ID, WorkspaceID: workflow.WorkspaceID, WorkflowName: workflow.Name, WorkflowRevision: revision, Mode: mode, State: StateQueued, Revision: 1, DefinitionJSON: string(definitionJSON), AuthorityJSON: string(authorityJSON), SourceJSON: string(sourceJSON), RemainingJSON: string(stepsJSON), ResultsJSON: "[]", CreatedAt: now, UpdatedAt: now}
+	if _, err := db.NewInsert().Model(&record).Exec(ctx); err != nil {
+		return record, err
+	}
+	return record, enqueueRun(ctx, db, record, now)
+}
+func (s *Service) Runs(ctx context.Context, actor workspaceaccess.ActorFacts, workspaceID, workflowID string) ([]Run, error) {
+	if _, err := s.authorize(ctx, actor, workspaceID, workspaceaccess.LevelRead); err != nil {
+		return nil, err
+	}
+	records := []runRecord{}
+	query := s.db.NewSelect().Model(&records).Where("workspace_id = ?", workspaceID).Order("created_at DESC").Limit(50)
+	if workflowID != "" {
+		query = query.Where("workflow_id = ?", workflowID)
+	}
+	if err := query.Scan(ctx); err != nil {
+		return nil, err
+	}
+	result := make([]Run, 0, len(records))
+	for _, record := range records {
+		item, err := decodeRun(record)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, nil
+}
+func (s *Service) GetRun(ctx context.Context, actor workspaceaccess.ActorFacts, workspaceID, id string) (Run, error) {
+	if _, err := s.authorize(ctx, actor, workspaceID, workspaceaccess.LevelRead); err != nil {
+		return Run{}, err
+	}
+	var record runRecord
+	err := s.db.NewSelect().Model(&record).Where("id = ? AND workspace_id = ?", id, workspaceID).Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Run{}, ErrNotFound
+	}
+	if err != nil {
+		return Run{}, err
+	}
+	return decodeRun(record)
+}
+func (s *Service) Cancel(ctx context.Context, actor workspaceaccess.ActorFacts, workspaceID, id string, expected int) (Run, error) {
+	if _, err := s.authorize(ctx, actor, workspaceID, workspaceaccess.LevelAdminister); err != nil {
+		return Run{}, err
+	}
+	var cancelled runRecord
+	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if err := organizationguard.LockWorkspace(ctx, tx, workspaceID); err != nil {
+			return err
+		}
+		result, err := tx.NewUpdate().Model((*runRecord)(nil)).Set("state = ?, revision = revision + 1, wake_at = NULL, updated_at = ?", StateCancelled, time.Now().UTC()).
+			Where("id = ? AND workspace_id = ? AND revision = ? AND state IN (?)", id, workspaceID, expected, bun.List([]string{StateQueued, StateRunning, StateWaiting, StateApproval})).Exec(ctx)
+		if err != nil {
+			return err
+		}
+		if n, _ := result.RowsAffected(); n != 1 {
+			return ErrState
+		}
+		// Read back the row that was just cancelled so the notices it left
+		// behind can be resolved. The stored results still describe the parked
+		// step, which is what resolution needs.
+		if err := tx.NewSelect().Model(&cancelled).Where("id = ?", id).Scan(ctx); err != nil {
+			return err
+		}
+		if step, ok := parkedApproval(decodeRunResults(cancelled)); ok {
+			return s.enqueueApprovalNotice(ctx, tx, cancelled, step.StepID, "resolved")
+		}
+		return nil
+	})
+	if err != nil {
+		return Run{}, err
+	}
+	// Cancelling is also how an approval is declined, so the approvers must
+	// hear that their wait is over. Today they hear nothing at all.
+	s.resolveApprovalNoticesAfterDecision(ctx, cancelled)
+	if stopper, ok := s.actions.(ReplyStopper); ok {
+		authority, err := s.authorize(ctx, actor, workspaceID, workspaceaccess.LevelAdminister)
+		if err != nil {
+			return Run{}, err
+		}
+		if err := stopper.StopReplies(ctx, authority, "", id); err != nil {
+			return Run{}, err
+		}
+	}
+
+	return s.GetRun(ctx, actor, workspaceID, id)
+}
+
+// Approve binds approval to the current native publication revision. The next
+// scheduling command receives that revision and rejects intervening edits.
+// Deciding a parked approval is its own level: a client is trusted with the
+// decision without being trusted to administer the workspace.
+func (s *Service) Approve(ctx context.Context, actor workspaceaccess.ActorFacts, workspaceID, id string, expected, publicationRevision int, replyText ...string) (Run, error) {
+	authority, err := s.authorize(ctx, actor, workspaceID, workspaceaccess.LevelApprove)
+	if err != nil {
+		return Run{}, err
+	}
+	var record runRecord
+	if err := s.db.NewSelect().Model(&record).Where("id = ? AND workspace_id = ?", id, workspaceID).Scan(ctx); err != nil {
+		return Run{}, ErrNotFound
+	}
+	if record.State != StateApproval || record.Revision != expected {
+		return Run{}, ErrState
+	}
+	run, err := decodeRun(record)
+	if err != nil {
+		return Run{}, err
+	}
+	index := -1
+	for i, step := range run.Steps {
+		if step.StepID == record.CurrentStepID {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return Run{}, ErrState
+	}
+	step := run.Steps[index]
+	if s.actions == nil {
+		return Run{}, errors.New("native workflow actions are unavailable")
+	}
+	if step.Kind == KindCommentReply || step.Kind == KindPrivateReply {
+		return s.approveCommentReply(ctx, actor, authority, record, run, index, replyText)
+	}
+
+	inputs := map[string]any{"publication_id": step.Inputs["publication_id"], "revision": publicationRevision}
+	if s.actions == nil {
+		return Run{}, errors.New("native workflow actions are unavailable")
+	}
+	approved, err := s.actions.Execute(ctx, EffectRequest{Kind: KindApproval, Inputs: inputs, Authority: authority, RunID: id, StepID: step.StepID, ExpiresAt: record.CreatedAt.Add(MaxRunAge)})
+	if err != nil {
+		return Run{}, err
+	}
+	if err := s.resumeApprovedRun(ctx, record, run, index, approved, actor.UserID); err != nil {
+		return Run{}, err
+	}
+	return s.GetRun(ctx, actor, workspaceID, id)
+}
+func (s *Service) resumeApprovedRun(ctx context.Context, record runRecord, run Run, index int, approved EffectResult, reviewerID string) error {
+	id, workspaceID, expected := record.ID, record.WorkspaceID, record.Revision
+	step := run.Steps[index]
+	now := time.Now().UTC()
+	approved.Output["approved_by"] = reviewerID
+	step.Output = approved.Output
+	step.State = StateSucceeded
+	step.CompletedAt = &now
+	run.Steps[index] = step
+	resultsJSON, err := json.Marshal(run.Steps)
+	if err != nil {
+		return err
+	}
+	var remaining []Step
+	if err := json.Unmarshal([]byte(record.RemainingJSON), &remaining); err != nil {
+		return err
+	}
+	if len(remaining) == 0 || remaining[0].ID != step.StepID {
+		return ErrState
+	}
+	remainingJSON, err := json.Marshal(remaining[1:])
+	if err != nil {
+		return err
+	}
+	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if err := organizationguard.LockWorkspace(ctx, tx, workspaceID); err != nil {
+			return err
+		}
+		result, err := tx.NewUpdate().Model((*runRecord)(nil)).Set("state = ?, results_json = ?, remaining_json = ?, current_step_id = '', revision = revision + 1, updated_at = ?", StateQueued, string(resultsJSON), string(remainingJSON), now).
+			Where("id = ? AND workspace_id = ? AND revision = ? AND state = ?", id, workspaceID, expected, StateApproval).Exec(ctx)
+		if err != nil {
+			return err
+		}
+		if n, _ := result.RowsAffected(); n != 1 {
+			return ErrState
+		}
+		record.Revision++
+		if err := s.enqueueApprovalNotice(ctx, tx, record, step.StepID, "resolved"); err != nil {
+			return err
+		}
+		return enqueueRun(ctx, tx, record, now)
+	})
+	if err != nil {
+		return err
+	}
+	// The other approvers are still holding an item that says the wait is open,
+	// with a button that would now answer ErrState. Resolving it is a courtesy
+	// that must not undo a committed decision, so it runs after the commit.
+	s.resolveApprovalNoticesAfterDecision(ctx, record)
+	return nil
+}
+
+func decodeRun(record runRecord) (Run, error) {
+	run := Run{ID: record.ID, WorkflowID: record.WorkflowID, WorkspaceID: record.WorkspaceID, WorkflowName: record.WorkflowName, WorkflowRevision: record.WorkflowRevision, Mode: record.Mode, State: record.State, Revision: record.Revision, CurrentStepID: record.CurrentStepID, Error: record.Error, WakeAt: record.WakeAt, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt, Steps: []StepResult{}}
+	for _, entry := range []struct {
+		data   string
+		target any
+	}{{record.DefinitionJSON, &run.Definition}, {record.SourceJSON, &run.Source}, {record.ResultsJSON, &run.Steps}} {
+		if err := json.Unmarshal([]byte(entry.data), entry.target); err != nil {
+			return Run{}, fmt.Errorf("decode workflow run: %w", err)
+		}
+	}
+	return run, nil
+}
+
+// CancelCommentReplyRuns is the internal workflow half of Inbox takeover. The
+// engagement owner supplies only runs holding native claims for that comment.
+func (s *Service) CancelCommentReplyRuns(ctx context.Context, tx bun.Tx, workspaceID string, ids []string) error {
+	var runs []runRecord
+	if err := tx.NewSelect().Model(&runs).Where("workspace_id = ? AND id IN (?) AND state IN (?)", workspaceID, bun.List(ids), bun.List([]string{StateQueued, StateRunning, StateWaiting, StateApproval})).Scan(ctx); err != nil {
+		return err
+	}
+	for _, run := range runs {
+		if _, err := tx.NewUpdate().Model(&run).Set("state = ?, revision = revision + 1, wake_at = NULL,updated_at = ?", StateCancelled, time.Now().UTC()).WherePK().Exec(ctx); err != nil {
+			return err
+		}
+		if step, ok := parkedApproval(decodeRunResults(run)); ok {
+			run.State = StateCancelled
+			if err := s.enqueueApprovalNotice(ctx, tx, run, step.StepID, "resolved"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Service) approveCommentReply(ctx context.Context, actor workspaceaccess.ActorFacts, authority workspaceaccess.StoredAuthority, record runRecord, run Run, index int, replyText []string) (Run, error) {
+	id, workspaceID, expected := record.ID, record.WorkspaceID, record.Revision
+	step := run.Steps[index]
+
+	if _, err := s.authorize(ctx, actor, workspaceID, workspaceaccess.LevelAdminister); err != nil {
+		return Run{}, err
+	}
+	inputs := map[string]any{}
+	for key, value := range step.Inputs {
+		inputs[key] = value
+	}
+	inputs["approved"] = true
+	inputs["workflow_id"] = record.WorkflowID
+	if len(replyText) > 0 {
+		inputs["text"] = replyText[0]
+	}
+	effect, err := s.actions.Execute(ctx, EffectRequest{Kind: step.Kind, Inputs: inputs, Authority: authority, RunID: id, StepID: step.StepID})
+	if err != nil {
+		return Run{}, err
+	}
+	if effect.Stop {
+		return s.Cancel(ctx, actor, workspaceID, id, expected)
+	}
+	step.Inputs["text"] = effect.Output["text"]
+	step.Output = effect.Output
+	step.State = StateQueued
+	run.Steps[index] = step
+	raw, err := json.Marshal(run.Steps)
+	if err != nil {
+		return Run{}, err
+	}
+	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if err := organizationguard.LockWorkspace(ctx, tx, workspaceID); err != nil {
+			return err
+		}
+		updated, err := tx.NewUpdate().Model((*runRecord)(nil)).Set("state = ?, results_json = ?, revision = revision + 1, updated_at = ?", StateQueued, string(raw), time.Now().UTC()).Where("id = ? AND workspace_id = ? AND revision = ? AND state = ?", id, workspaceID, expected, StateApproval).Exec(ctx)
+		if err != nil {
+			return err
+		}
+		if n, _ := updated.RowsAffected(); n != 1 {
+			return ErrState
+		}
+		record.Revision++
+		if err := s.enqueueApprovalNotice(ctx, tx, record, step.StepID, "resolved"); err != nil {
+			return err
+		}
+		return enqueueRun(ctx, tx, record, time.Now().UTC())
+	})
+	if err != nil {
+		return Run{}, err
+	}
+	s.resolveApprovalNoticesAfterDecision(ctx, record)
+	return s.GetRun(ctx, actor, workspaceID, id)
+}

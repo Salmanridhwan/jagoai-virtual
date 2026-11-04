@@ -1,0 +1,5 @@
+{
+  "title": "TypeScript SDK",
+  "icon": "Braces",
+  "pages": ["!index", "publications", "reliability"]
+}

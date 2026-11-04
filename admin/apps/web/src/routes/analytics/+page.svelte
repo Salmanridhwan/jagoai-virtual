@@ -1,0 +1,1642 @@
+<!--
+THESIS: Analytics leads with measured outcomes, then audience and account performance.
+OWN-WORLD: It uses OpenPost's flat borders, compact controls, and provider marks.
+STORY: Choose accounts and dates, compare outcomes, then inspect the source post.
+FIRST VIEWPORT: Compact reporting controls lead directly into the outcome summary and chart.
+FORM: Server-owned insights and content rows preserve source, period, sample, and provider context.
+-->
+<script lang="ts">
+	import { appBranding } from '$lib/app-branding.svelte';
+	import AnalyticsDateRange from '$lib/components/analytics-date-range.svelte';
+	import type { AnalyticsRangeDays } from '@openpost/query-catalog';
+	import { page } from '$app/state';
+	import { untrack } from 'svelte';
+	import AnalyticsNumber from '$lib/components/analytics-number.svelte';
+	import AnalyticsExportDialog from '$lib/components/analytics-export-dialog.svelte';
+	import { ProtectedIcon, ThemeIcon } from '$lib/themes/icons';
+	import Disclosure from '$lib/components/disclosure.svelte';
+	import {
+		accountFeaturesQueryOptions,
+		analyticsOverviewQueryOptions,
+		analyticsQueryKeys
+	} from '@openpost/query-catalog';
+	import { createInfiniteQuery, createQuery } from '@tanstack/svelte-query';
+	import { goto, replaceState } from '$app/navigation';
+	import { resolve } from '$app/paths';
+	import { client } from '$lib/api/client';
+	import type { components } from '$lib/api/types';
+	import { analyticsQueryAPI } from '$lib/query/analytics';
+	import { queryClient } from '$lib/query/client';
+	import {
+		captureQueryMutationSession,
+		queryMutationSessionIsCurrent,
+		settleQueryMutationSession,
+		type QueryMutationSession
+	} from '$lib/query/authorization-boundary';
+	import { reconcileQueryMutation } from '$lib/query/mutation-reconciliation';
+	import { featureQueryAPI } from '$lib/query/features';
+	import { ui } from '$lib/stores/ui.svelte';
+	import { auth } from '$lib/stores/auth';
+	import { workspaceCtx } from '$lib/stores/workspace.svelte';
+	import { Button } from '$lib/components/ui/button';
+	import * as Select from '$lib/components/ui/select';
+	import * as Popover from '$lib/components/ui/popover';
+	import PageContainer from '$lib/components/page-container.svelte';
+	import EmptyState from '$lib/components/empty-state.svelte';
+	import InlineNotice from '$lib/components/inline-notice.svelte';
+	import AppToast from '$lib/components/app-toast.svelte';
+	import AnalyticsPerformanceChart from '$lib/components/analytics-performance-chart.svelte';
+	import SocialSetControl from '$lib/components/social-set-control.svelte';
+	import AnalyticsAccountPerformance from '$lib/components/analytics-account-performance.svelte';
+	import AnalyticsPostHighlights from '$lib/components/analytics-post-highlights.svelte';
+	import AnalyticsAccountComposition from '$lib/components/analytics-account-composition.svelte';
+	import SocialAccountIdentity from '$lib/components/social-account-identity.svelte';
+	import SectionHeading from '$lib/components/section-heading.svelte';
+	import PlatformIcon from '$lib/components/platform-icon.svelte';
+	import { m } from '$lib/paraglide/messages';
+	import { getLocaleTag } from '$lib/i18n';
+	import { analyticsMetricLabel } from '$lib/analytics-metric-label';
+	import { formatSocialAccountLabel, formatSocialAccountName, getPlatformName } from '$lib/utils';
+	import {
+		appendAnalyticsContentPage,
+		hasEngagementMeasurement,
+		insightHasRanking,
+		type AnalyticsSortMode
+	} from '$lib/analytics-overview';
+	import { allFeatureEffectiveDisabled, collectiveDisabledReason } from '$lib/feature-disabled';
+
+	type AnalyticsOverview = components['schemas']['Overview'];
+	type AnalyticsAccount = components['schemas']['AccountOverview'];
+	type AnalyticsContent = components['schemas']['ContentOverview'];
+	type AnalyticsInsight = components['schemas']['Insight'];
+	type AnalyticsMetricMetadata = components['schemas']['AnalyticsMetricMetadata'];
+	type MetricSummary = components['schemas']['MetricSummary'];
+	type RangeDays = AnalyticsRangeDays;
+	type ChartMetric = 'followers' | 'engagement' | 'visibility';
+
+	const rangePresets: RangeDays[] = [0, 7, 30, 90, 365];
+	let rangeDays = $state<RangeDays>(
+		rangePresets.find((days) => String(days) === page.url.searchParams.get('days')) ?? 30
+	);
+	let rangeFrom = $state(page.url.searchParams.get('from') ?? '');
+	let rangeTo = $state(page.url.searchParams.get('to') ?? '');
+	const rangeLabel = $derived(
+		rangeFrom && rangeTo
+			? m.analytics_range_dates({ from: rangeFrom, to: rangeTo })
+			: rangeDays === 0
+				? m.analytics_range_all()
+				: rangeDays === 365
+					? m.analytics_range_year()
+					: m.analytics_range_days({ days: rangeDays })
+	);
+	let selectedAccountIDs = $state<string[]>([]);
+	let selectedSetID = $state('');
+	let selectedAccountWorkspaceID = $state('');
+	let chartMetric = $state<ChartMetric>('visibility');
+	let sortMode = $state<AnalyticsSortMode>('visibility');
+	let expandedContentID = $state('');
+	let refreshing = $state(false);
+	let warningsOpen = $state(false);
+	let exportOpen = $state(false);
+	let refreshSequence = 0;
+	let repurposingReferenceKey = $state('');
+	let handledRepurposeURL = $state('');
+	let toastMessage = $state('');
+	let toastTone = $state<'success' | 'error'>('success');
+
+	const currentWorkspaceID = $derived(workspaceCtx.currentWorkspace?.id ?? '');
+	const canEdit = $derived(workspaceCtx.currentWorkspace?.can_edit ?? false);
+	const queryAccountIDs = $derived(
+		selectedAccountWorkspaceID === currentWorkspaceID ? selectedAccountIDs : []
+	);
+
+	const analyticsQuery = createInfiniteQuery(() =>
+		analyticsOverviewQueryOptions(analyticsQueryAPI, currentWorkspaceID, {
+			days: rangeDays,
+			from: rangeFrom,
+			to: rangeTo,
+			accountIds: queryAccountIDs,
+			sort: sortMode,
+			limit: 50
+		})
+	);
+	const overview = $derived(combineAnalyticsPages(analyticsQuery.data?.pages ?? []));
+	const accounts = $derived(overview?.accounts ?? []);
+	const scopedAccounts = $derived(
+		accounts.filter(
+			(account) => queryAccountIDs.length === 0 || queryAccountIDs.includes(account.id)
+		)
+	);
+	type FilterAccount = {
+		id: string;
+		platform: string;
+		username: string;
+		avatar_url?: string;
+		inactive: boolean;
+	};
+	let historicalAccounts = $state<FilterAccount[]>([]);
+	let catalogWorkspaceID = $state('');
+	$effect(() => {
+		if (!overview || analyticsQuery.isPlaceholderData) return;
+		const workspaceID = currentWorkspaceID;
+		const history = (overview.performance ?? [])
+			.filter((item) => !accounts.some((account) => account.id === item.account_id))
+			.map((item) => ({
+				id: item.account_id,
+				platform: item.platform,
+				username: item.username,
+				avatar_url: item.avatar_url,
+				inactive: true
+			}));
+		untrack(() => {
+			const known = catalogWorkspaceID === workspaceID ? historicalAccounts : [];
+			const merged = [
+				...new Map([...known, ...history].map((account) => [account.id, account])).values()
+			];
+			catalogWorkspaceID = workspaceID;
+			if (JSON.stringify(merged) !== JSON.stringify(historicalAccounts))
+				historicalAccounts = merged;
+		});
+	});
+	const filterAccounts = $derived([
+		...accounts.map(({ id, platform, username, avatar_url }) => ({
+			id,
+			platform,
+			username,
+			avatar_url,
+			inactive: false
+		})),
+		...(catalogWorkspaceID === currentWorkspaceID ? historicalAccounts : []).filter(
+			(item) => !accounts.some((account) => account.id === item.id)
+		)
+	]);
+	const pickerAccounts = $derived(
+		filterAccounts.map((account) => ({
+			id: account.id,
+			platform: account.platform,
+			account_id: account.id,
+			account_username: account.username,
+			account_avatar_url: account.avatar_url ?? '',
+			slug: '',
+			alias: account.inactive
+				? `${accountName(account)} · ${m.settings_member_status_inactive()}`
+				: undefined
+		}))
+	);
+	function selectAccounts(ids: string[]) {
+		selectedAccountIDs = [...new Set(ids)].sort();
+		selectedSetID = '';
+	}
+	const featuresQuery = createQuery(() =>
+		accountFeaturesQueryOptions(
+			featureQueryAPI,
+			currentWorkspaceID,
+			accounts.map((account) => account.id)
+		)
+	);
+	const analyticsFeatures = $derived(featuresQuery.data ?? []);
+	const loading = $derived(analyticsQuery.isFetching && !analyticsQuery.isFetchingNextPage);
+	const loadingMore = $derived(analyticsQuery.isFetchingNextPage);
+	const initialFeatureReadPending = $derived(
+		Boolean(overview && accounts.length > 0 && featuresQuery.isPending && !featuresQuery.data)
+	);
+	const error = $derived(
+		analyticsQuery.isError && !analyticsQuery.data
+			? queryErrorMessage(analyticsQuery.error, m.analytics_failed_load())
+			: overview && accounts.length > 0 && featuresQuery.isError && !featuresQuery.data
+				? queryErrorMessage(featuresQuery.error, m.analytics_failed_load())
+				: ''
+	);
+	const backgroundError = $derived(
+		analyticsQuery.isError && analyticsQuery.data && !analyticsQuery.isFetchNextPageError
+			? queryErrorMessage(analyticsQuery.error, m.analytics_failed_load())
+			: featuresQuery.isError && overview
+				? queryErrorMessage(featuresQuery.error, m.analytics_failed_load())
+				: ''
+	);
+	const contentItems = $derived(overview?.content ?? []);
+	const exportMetrics = $derived(overview?.content_metric_keys ?? []);
+	const analyticsInsights = $derived(overview?.insights ?? []);
+	const selectedAccount = $derived(
+		queryAccountIDs.length === 1
+			? accounts.find((account) => account.id === queryAccountIDs[0])
+			: undefined
+	);
+	const chartPoints = $derived(overview?.trends?.[chartMetric] ?? []);
+	const chartTitle = $derived(
+		chartMetric === 'followers'
+			? m.analytics_daily_followers()
+			: chartMetric === 'engagement'
+				? m.analytics_daily_engagement()
+				: m.analytics_visibility()
+	);
+	const accountsNeedingReconnect = $derived(
+		accounts.filter(
+			(account) =>
+				(queryAccountIDs.length === 0 || queryAccountIDs.includes(account.id)) &&
+				(account.status === 'permission_required' ||
+					(account.missing_account_scopes?.length ?? 0) > 0 ||
+					(account.missing_content_scopes?.length ?? 0) > 0)
+		)
+	);
+	const displayedSummary = $derived(overview?.summary ?? null);
+	const destinationCount = $derived(overview?.content_total ?? 0);
+	const hasMeasurements = $derived(
+		scopedAccounts.some((account) => Boolean(account.last_synced_at)) ||
+			contentItems.some((item) => Boolean(item.collected_at || item.last_synced_at))
+	);
+	const initialLoading = $derived(
+		Boolean(currentWorkspaceID) &&
+			!error &&
+			((analyticsQuery.isPending && !analyticsQuery.data) || initialFeatureReadPending)
+	);
+	const analyticsAllDisabled = $derived(
+		(overview?.accounts?.length ?? 0) > 0 &&
+			allFeatureEffectiveDisabled(analyticsFeatures, 'analytics')
+	);
+	const analyticsReason = $derived(collectiveDisabledReason(analyticsFeatures, 'analytics'));
+	const analyticsEmptyIsFeatureDisabled = $derived(
+		analyticsAllDisabled && !hasMeasurements && !initialLoading && !error
+	);
+	const showAnalyticsDisabledNotice = $derived(analyticsAllDisabled && hasMeasurements);
+	const warningCount = $derived(
+		accountsNeedingReconnect.length +
+			Number(showAnalyticsDisabledNotice) +
+			Number(Boolean(selectedAccount?.stale)) +
+			Number(!hasMeasurements)
+	);
+	const summaryMetrics = $derived.by(() => {
+		const summary = displayedSummary;
+		if (!summary) return [];
+		return [
+			{
+				key: 'followers',
+				label: m.analytics_summary_followers(),
+				metric: summary.followers,
+				denominator: scopedAccounts.length,
+				unit: 'account' as const
+			},
+			{
+				key: 'engagement',
+				label: m.analytics_summary_engagement(),
+				metric: summary.engagement,
+				denominator: destinationCount,
+				unit: 'destination' as const
+			},
+			{
+				key: 'visibility',
+				label: m.analytics_visibility(),
+				metric: summary.visibility ?? { value: 0, measured: 0 },
+				denominator: destinationCount,
+				unit: 'destination' as const
+			},
+			{
+				key: 'reach',
+				label: m.analytics_reach(),
+				metric: summary.reach,
+				denominator: destinationCount,
+				unit: 'destination' as const
+			}
+		];
+	});
+	const featuredSummaryMetrics = $derived(
+		['visibility', 'engagement', 'followers'].flatMap((key) =>
+			summaryMetrics.filter((item) => item.key === key)
+		)
+	);
+	const secondarySummaryMetrics = $derived(
+		summaryMetrics.filter((item) => item.key === 'reach' && item.metric.measured > 0)
+	);
+	const unavailableSummaryMetrics = $derived(
+		summaryMetrics.filter((item) => item.metric.measured === 0)
+	);
+	$effect(() => {
+		if (selectedAccountWorkspaceID !== currentWorkspaceID) {
+			refreshSequence++;
+			refreshing = false;
+			selectedAccountWorkspaceID = currentWorkspaceID;
+			selectedAccountIDs = [];
+			selectedSetID = '';
+			expandedContentID = '';
+			warningsOpen = false;
+		}
+
+		if (
+			expandedContentID &&
+			analyticsQuery.data &&
+			!contentItems.some((item) => contentIdentity(item) === expandedContentID)
+		) {
+			expandedContentID = '';
+		}
+	});
+
+	$effect(() => {
+		const requestURL = page.url.href;
+		const actorID = $auth.user?.id;
+		const params = new URL(requestURL).searchParams;
+		const workspaceID = params.get('workspace');
+		if (params.get('repurpose_type') !== 'openpost' || !workspaceID || !actorID) return;
+		let active = true;
+		const isCurrent = () => active && $auth.user?.id === actorID && page.url.href === requestURL;
+		untrack(() => {
+			if (currentWorkspaceID === workspaceID) return;
+			void workspaceCtx
+				.initialize(workspaceID, { selectionIsCurrent: isCurrent })
+				.then(() => {
+					if (!isCurrent() || currentWorkspaceID === workspaceID) return;
+					toastTone = 'error';
+					toastMessage = m.analytics_repurpose_failed();
+				})
+				.catch(() => {
+					if (!isCurrent()) return;
+					toastTone = 'error';
+					toastMessage = m.analytics_repurpose_failed();
+				});
+		});
+		return () => {
+			active = false;
+		};
+	});
+
+	$effect(() => {
+		const params = page.url.searchParams;
+		if (
+			params.get('repurpose_type') !== 'openpost' ||
+			!canEdit ||
+			!analyticsQuery.isSuccess ||
+			analyticsQuery.isPlaceholderData ||
+			analyticsQuery.isFetching ||
+			!overview ||
+			!currentWorkspaceID ||
+			params.get('workspace') !== currentWorkspaceID ||
+			handledRepurposeURL === page.url.href
+		)
+			return;
+		const publicationID = params.get('repurpose_publication_id') || '';
+		const renditionID = params.get('repurpose_rendition_id') || '';
+		if (!publicationID || !renditionID) return;
+		handledRepurposeURL = page.url.href;
+		const url = new URL(page.url);
+		for (const name of ['repurpose_type', 'repurpose_publication_id', 'repurpose_rendition_id'])
+			url.searchParams.delete(name);
+		replaceState(url, page.state);
+		void repurposeReference({
+			type: 'openpost',
+			publication_id: publicationID,
+			rendition_id: renditionID
+		});
+	});
+
+	async function loadMoreContent() {
+		if (!overview?.content_next_cursor || loadingMore) return;
+		const result = await analyticsQuery.fetchNextPage();
+		if (!result.isError) return;
+		toastTone = 'error';
+		toastMessage = m.analytics_load_more_failed();
+	}
+
+	async function refreshAnalytics() {
+		if (!currentWorkspaceID || refreshing || analyticsAllDisabled) return;
+		const view = {
+			session: captureQueryMutationSession(),
+			sequence: ++refreshSequence,
+			workspaceID: currentWorkspaceID
+		} satisfies AnalyticsRefreshView;
+		refreshing = true;
+		try {
+			const response = await client.POST('/analytics/refresh', {
+				body: { workspace_id: view.workspaceID }
+			});
+			if (!settleQueryMutationSession(view.session, response.response)) return;
+			if (response.error || !response.data) throw new Error(m.analytics_refresh_failed());
+			const reconciled = await reconcileQueryMutation(queryClient, view.session, {
+				invalidate: [
+					{
+						queryKey: analyticsQueryKeys.all(view.workspaceID),
+						refetchType: 'none'
+					}
+				]
+			});
+			if (!reconciled || !analyticsRefreshViewIsCurrent(view)) return;
+			toastTone = 'success';
+			toastMessage = m.analytics_refresh_queued({ count: response.data.queued });
+		} catch {
+			if (analyticsRefreshViewIsCurrent(view)) {
+				toastTone = 'error';
+				toastMessage = m.analytics_refresh_failed();
+			}
+		} finally {
+			if (view.sequence === refreshSequence) refreshing = false;
+		}
+	}
+
+	interface AnalyticsRefreshView {
+		readonly session: QueryMutationSession;
+		readonly sequence: number;
+		readonly workspaceID: string;
+	}
+
+	function analyticsRefreshViewIsCurrent(view: AnalyticsRefreshView) {
+		return (
+			view.sequence === refreshSequence &&
+			view.workspaceID === currentWorkspaceID &&
+			queryMutationSessionIsCurrent(view.session)
+		);
+	}
+
+	function setDateRange(days: RangeDays, from: string, to: string) {
+		rangeDays = days;
+		rangeFrom = from;
+		rangeTo = to;
+		const url = new URL(page.url);
+		url.searchParams.set('days', String(days));
+		if (from && to) {
+			url.searchParams.set('from', from);
+			url.searchParams.set('to', to);
+		} else {
+			url.searchParams.delete('from');
+			url.searchParams.delete('to');
+		}
+		replaceState(url, page.state);
+	}
+
+	function combineAnalyticsPages(pages: AnalyticsOverview[]): AnalyticsOverview | null {
+		return pages.reduce<AnalyticsOverview | null>(
+			(combined, page) => (combined ? appendAnalyticsContentPage(combined, page) : page),
+			null
+		);
+	}
+
+	function queryErrorMessage(cause: unknown, fallback: string) {
+		return cause instanceof Error && cause.message ? cause.message : fallback;
+	}
+
+	function retryReads() {
+		if (analyticsQuery.isError) void analyticsQuery.refetch();
+		if (featuresQuery.isError) void featuresQuery.refetch();
+	}
+
+	async function repurposeContent(item: AnalyticsContent) {
+		return repurposeReference(item.reference, contentIdentity(item));
+	}
+
+	async function repurposeReference(
+		reference: components['schemas']['ContentReference'],
+		key = JSON.stringify(reference)
+	) {
+		if (!canEdit || !currentWorkspaceID || repurposingReferenceKey) return;
+		const requestedWorkspaceID = currentWorkspaceID;
+		repurposingReferenceKey = key;
+		try {
+			const response = await client.POST('/analytics/repurpose', {
+				body: {
+					workspace_id: requestedWorkspaceID,
+					reference,
+					range: { days: rangeDays, from: rangeFrom || undefined, to: rangeTo || undefined }
+				}
+			});
+			if (response.error || !response.data) {
+				throw new Error(response.error?.detail || m.analytics_repurpose_failed());
+			}
+			if (currentWorkspaceID !== requestedWorkspaceID) return;
+			ui.setRepurposeHandoff(response.data);
+			await goto(resolve('/'));
+		} catch (cause) {
+			if (currentWorkspaceID !== requestedWorkspaceID) return;
+			toastTone = 'error';
+			toastMessage = cause instanceof Error ? cause.message : m.analytics_repurpose_failed();
+		} finally {
+			repurposingReferenceKey = '';
+		}
+	}
+
+	function formatNumber(value: number) {
+		return new Intl.NumberFormat(getLocaleTag(), {
+			notation: 'compact',
+			maximumFractionDigits: 1
+		}).format(value);
+	}
+
+	function formatDate(value: string) {
+		return new Intl.DateTimeFormat(getLocaleTag(), {
+			month: 'short',
+			day: 'numeric',
+			year: 'numeric',
+			timeZone: workspaceCtx.settings.timezone || 'UTC'
+		}).format(new Date(value));
+	}
+
+	function formatShortDate(value: string) {
+		return new Intl.DateTimeFormat(getLocaleTag(), {
+			month: 'short',
+			day: 'numeric',
+			timeZone: 'UTC'
+		}).format(new Date(`${value}T00:00:00Z`));
+	}
+
+	function formatDateTime(value: string) {
+		return new Intl.DateTimeFormat(getLocaleTag(), {
+			month: 'short',
+			day: 'numeric',
+			hour: '2-digit',
+			minute: '2-digit',
+			timeZone: workspaceCtx.settings.timezone || 'UTC'
+		}).format(new Date(value));
+	}
+
+	function accountName(account: Pick<AnalyticsAccount, 'username' | 'platform'>): string {
+		return formatSocialAccountName(account.username, account.platform) || account.platform;
+	}
+
+	function accountLabel(account: Pick<AnalyticsAccount, 'username' | 'platform'>): string {
+		return formatSocialAccountLabel(account.username, account.platform);
+	}
+
+	function renditionName(rendition: AnalyticsContent): string {
+		return (
+			formatSocialAccountName(rendition.username, rendition.platform) ||
+			getPlatformName(rendition.platform)
+		);
+	}
+
+	function metricValue(metric: MetricSummary) {
+		return metric.measured > 0 ? formatNumber(metric.value) : '-';
+	}
+
+	function contentStatus(item: AnalyticsContent) {
+		if (item.status === 'permission_required')
+			return item.error_message || m.analytics_permission_required();
+		if (item.status === 'unsupported') return item.error_message || m.analytics_unsupported();
+		if (item.status === 'rate_limited') return m.analytics_rate_limited();
+		if (item.status === 'temporarily_unavailable')
+			return item.error_message || m.analytics_collection_delayed();
+		if (item.status === 'failed') return m.analytics_collection_failed();
+		if (item.stale) {
+			return item.next_sync_at
+				? m.analytics_stale_retry({ date: formatDateTime(item.next_sync_at) })
+				: m.analytics_stale();
+		}
+		if (!item.last_synced_at) return m.analytics_no_measurement();
+		return '';
+	}
+
+	function semanticMetricValue(item: AnalyticsContent, key: string, value: number) {
+		const unit = item.measurements?.[key]?.metadata.unit ?? item.metric_metadata?.[key]?.unit;
+		if (unit === 'basis_points') {
+			return new Intl.NumberFormat(getLocaleTag(), {
+				style: 'percent',
+				minimumFractionDigits: 0,
+				maximumFractionDigits: 2
+			}).format(value / 10_000);
+		}
+		if (unit === 'milliseconds') {
+			const seconds = value / 1000;
+			if (seconds < 60) return `${formatNumber(seconds)}s`;
+			return `${formatNumber(seconds / 60)} min`;
+		}
+		return formatNumber(value);
+	}
+
+	function metricEvidence(item: AnalyticsContent) {
+		return Object.entries(item.metrics).map(([key, value]) => {
+			const measurement = item.measurements?.[key];
+			return {
+				key,
+				label: analyticsMetricLabel(key),
+				value: semanticMetricValue(item, key, value),
+				metadata: measurement?.metadata ?? item.metric_metadata?.[key],
+				collectedAt: measurement?.collected_at ?? item.collected_at,
+				availability: measurement?.availability ?? 'available'
+			};
+		});
+	}
+
+	function metricUnit(metadata: AnalyticsMetricMetadata | undefined) {
+		switch (metadata?.unit) {
+			case 'milliseconds':
+				return m.analytics_evidence_milliseconds();
+			case 'basis_points':
+				return m.analytics_evidence_basis_points();
+			case 'count':
+				return m.analytics_evidence_count();
+			default:
+				return m.analytics_evidence_unavailable();
+		}
+	}
+
+	function aggregationLabel(aggregation: string | undefined) {
+		switch (aggregation) {
+			case 'current_snapshot':
+				return m.analytics_evidence_current_snapshot();
+			case 'lifetime_total':
+				return m.analytics_evidence_lifetime_total();
+			case 'reporting_period_total':
+				return m.analytics_evidence_reporting_period_total();
+			case 'reporting_period_average':
+				return m.analytics_evidence_reporting_period_average();
+			default:
+				return m.analytics_evidence_unavailable();
+		}
+	}
+
+	function metricPeriod(metadata: AnalyticsMetricMetadata | undefined) {
+		return metadata?.period_start && metadata.period_end
+			? `${formatDate(metadata.period_start)} – ${formatDate(metadata.period_end)}`
+			: m.analytics_evidence_period_unavailable();
+	}
+
+	function availabilityLabel(availability: string) {
+		switch (availability) {
+			case 'available':
+				return m.analytics_evidence_available();
+			case 'pending':
+				return m.analytics_evidence_pending();
+			case 'insufficient_data':
+				return m.analytics_evidence_insufficient();
+			default:
+				return m.analytics_evidence_unavailable();
+		}
+	}
+
+	function metricCaveat(aggregation: string | undefined) {
+		if (aggregation === 'lifetime_total') return m.analytics_insight_lifetime_caveat();
+		if (aggregation === 'reporting_period_total' || aggregation === 'reporting_period_average')
+			return m.analytics_insight_reporting_period_caveat();
+		return '';
+	}
+
+	function contentIdentity(item: AnalyticsContent) {
+		return `openpost:${item.reference.rendition_id ?? ''}`;
+	}
+
+	function contentLabel(item: Pick<AnalyticsContent, 'title' | 'excerpt'>) {
+		return item.title || item.excerpt || m.analytics_untitled_publication();
+	}
+
+	function insightTitle(insight: AnalyticsInsight) {
+		switch (insight.kind) {
+			case 'most_engagement_actions':
+				return m.analytics_insight_most_engagement();
+			case 'strongest_measured_destination':
+				return m.analytics_insight_top_destination();
+			default:
+				return m.analytics_insight_follower_decline();
+		}
+	}
+
+	function insightBody(insight: AnalyticsInsight) {
+		if (!insightHasRanking(insight)) {
+			switch (insight.reason) {
+				case 'low_sample':
+					return insight.kind === 'strongest_measured_destination'
+						? m.analytics_insight_insufficient_destinations()
+						: m.analytics_insight_insufficient_low_sample();
+				case 'incompatible_semantics':
+					return m.analytics_insight_insufficient_incompatible();
+				case 'no_decline':
+					return m.analytics_insight_no_decline();
+				default:
+					return m.analytics_insight_insufficient_missing();
+			}
+		}
+		if (insight.kind === 'follower_decline') {
+			return m.analytics_insight_follower_decline_body({
+				count: formatNumber(Math.abs(insight.value))
+			});
+		}
+		if (insight.kind === 'strongest_measured_destination') {
+			return m.analytics_insight_top_destination_body({
+				engagement: formatNumber(insight.value)
+			});
+		}
+		return m.analytics_insight_most_engagement_body({
+			content:
+				insight.content?.title || insight.content?.excerpt || m.analytics_untitled_publication(),
+			engagement: formatNumber(insight.value)
+		});
+	}
+
+	function insightAccountName(insight: AnalyticsInsight) {
+		return (
+			formatSocialAccountName(insight.username ?? '', insight.platform ?? '') ||
+			getPlatformName(insight.platform ?? '')
+		);
+	}
+
+	function insightIdentity(insight: AnalyticsInsight) {
+		if (
+			!insightHasRanking(insight) ||
+			(insight.kind !== 'strongest_measured_destination' && insight.kind !== 'follower_decline')
+		) {
+			return undefined;
+		}
+		const account = accounts.find((candidate) => candidate.id === insight.account_id);
+		return {
+			name: account ? accountName(account) : insightAccountName(insight),
+			platform: account?.platform ?? insight.platform ?? '',
+			avatarUrl: account?.avatar_url
+		};
+	}
+
+	function insightSample(insight: AnalyticsInsight) {
+		return m.analytics_insight_sample({
+			measured: insight.measured_count,
+			total: insight.comparison_sample
+		});
+	}
+
+	function insightCaveat(insight: AnalyticsInsight) {
+		switch (insight.caveat) {
+			case 'filtered_content_lifetime_totals':
+				return m.analytics_insight_lifetime_caveat();
+			case 'filtered_content_reporting_period_totals':
+				return m.analytics_insight_reporting_period_caveat();
+			case 'account_wide':
+				return m.analytics_insight_account_wide_caveat();
+			default:
+				return '';
+		}
+	}
+
+	function insightPeriod(insight: AnalyticsInsight) {
+		const start = insight.period.measurement_start ?? insight.period.filter_start;
+		const end = insight.period.measurement_end ?? insight.period.filter_end;
+		return `${formatDate(start)} – ${formatDate(end)}`;
+	}
+
+	function insightPeriodLabel(insight: AnalyticsInsight) {
+		return insight.period.aggregation === 'current_snapshot' ||
+			insight.period.aggregation === 'reporting_period_total'
+			? m.analytics_insight_period_label()
+			: m.analytics_insight_content_range_label();
+	}
+
+	function insightMetricLabel(insight: AnalyticsInsight) {
+		return insight.metric === 'followers'
+			? m.analytics_evidence_followers()
+			: m.analytics_evidence_engagement_actions();
+	}
+</script>
+
+<svelte:head>
+	<title>{m.analytics_title()} · {appBranding.profile.display_name}</title>
+</svelte:head>
+
+<AnalyticsExportDialog
+	bind:open={exportOpen}
+	workspaceId={currentWorkspaceID}
+	days={rangeDays}
+	from={rangeFrom}
+	to={rangeTo}
+	{rangeLabel}
+	accountIds={queryAccountIDs}
+	accounts={filterAccounts}
+	metrics={exportMetrics}
+/>
+
+{#snippet actions()}
+	<div class="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
+		<SocialSetControl
+			mode="filter"
+			workspaceId={currentWorkspaceID}
+			accounts={pickerAccounts}
+			selectedAccountIds={queryAccountIDs}
+			bind:selectedSetId={selectedSetID}
+			onApply={(set) => {
+				selectedAccountIDs = (set?.accounts ?? []).map((item) => item.social_account_id);
+			}}
+			onToggle={(account) =>
+				selectAccounts(
+					queryAccountIDs.includes(account.id)
+						? queryAccountIDs.filter((id) => id !== account.id)
+						: [...queryAccountIDs, account.id]
+				)}
+			onClearAll={() => selectAccounts([])}
+		/>
+		<AnalyticsDateRange days={rangeDays} from={rangeFrom} to={rangeTo} onchange={setDateRange} />
+		<Button
+			variant="outline"
+			size="icon-sm"
+			title={m.analytics_export()}
+			aria-label={m.analytics_export()}
+			disabled={!overview || filterAccounts.length === 0}
+			onclick={() => (exportOpen = true)}
+			data-testid="analytics-export"
+		>
+			<ThemeIcon role="download" class="size-4" />
+		</Button>
+		<Popover.Root bind:open={warningsOpen}>
+			<Popover.Trigger>
+				{#snippet child({ props })}
+					<Button
+						{...props}
+						variant="outline"
+						size="icon-sm"
+						title={warningCount ? m.analytics_warnings() : m.analytics_data_notes()}
+						aria-label={warningCount
+							? `${m.analytics_warnings()}: ${warningCount}`
+							: m.analytics_data_notes()}
+						disabled={!overview || filterAccounts.length === 0}
+						data-testid="analytics-warnings"
+					>
+						<ProtectedIcon icon={warningCount ? 'warning' : 'info'} class="size-4" />
+					</Button>
+				{/snippet}
+			</Popover.Trigger>
+			<Popover.Content
+				align="end"
+				collisionPadding={8}
+				class="max-h-[min(32rem,var(--bits-popover-content-available-height))] w-[min(28rem,calc(100vw-1rem))] overflow-y-auto overscroll-contain"
+				aria-label={m.analytics_data_notes()}
+			>
+				<div class="mb-3 flex items-center justify-between gap-2">
+					<h2 class="text-sm font-semibold">{m.analytics_data_notes()}</h2>
+					<Button
+						variant="ghost"
+						size="icon-sm"
+						aria-label={m.common_close()}
+						onclick={() => (warningsOpen = false)}><ThemeIcon role="close" class="size-4" /></Button
+					>
+				</div>
+				<div class="space-y-3">
+					{#if showAnalyticsDisabledNotice}
+						<div data-testid="analytics-disabled-notice">
+							<InlineNotice
+								tone="warning"
+								class="flex-col items-start"
+								message={m.analytics_feature_disabled_notice()}
+							>
+								{#snippet actions()}
+									<Button
+										href="/settings?tab=accounts"
+										variant="outline"
+										size="sm"
+										data-testid="analytics-disabled-recovery"
+										>{m.feature_disabled_open_details()}</Button
+									>
+								{/snippet}
+								{#if analyticsReason}
+									<p class="mt-1 text-xs leading-5" data-testid="analytics-disabled-reason">
+										{analyticsReason}
+									</p>
+								{/if}
+							</InlineNotice>
+						</div>
+					{/if}
+					{#each accountsNeedingReconnect as account (account.id)}
+						<InlineNotice
+							tone="warning"
+							class="flex-col items-start"
+							message={`${accountLabel(account)}: ${account.error_message || m.analytics_permission_required()}`}
+						>
+							{#snippet actions()}
+								<Button href="/settings?tab=accounts" variant="outline" size="sm"
+									>{m.analytics_reconnect()}</Button
+								>
+							{/snippet}
+						</InlineNotice>
+					{/each}
+					{#if selectedAccount?.stale}
+						<InlineNotice
+							tone="info"
+							message={selectedAccount.next_sync_at
+								? m.analytics_stale_retry({ date: formatDateTime(selectedAccount.next_sync_at) })
+								: m.analytics_stale()}
+						/>
+					{/if}
+
+					{#if !hasMeasurements}<InlineNotice
+							tone="info"
+							message={m.analytics_waiting_description()}
+						/>{/if}
+				</div>
+				<div
+					class="mt-3 space-y-3 border-t border-border pt-3 text-xs leading-5 text-muted-foreground"
+				>
+					{#if unavailableSummaryMetrics.length}
+						<p>
+							{m.analytics_unavailable_metrics({
+								metrics: unavailableSummaryMetrics.map((item) => item.label).join(', ')
+							})}
+						</p>
+					{/if}
+					<p>{m.analytics_visibility_definition()}</p>
+					<p class="mt-2">
+						{m.analytics_visibility_missing({
+							count: Math.max(0, destinationCount - (displayedSummary?.visibility?.measured ?? 0))
+						})}
+					</p>
+					<ul class="mt-2 space-y-1">
+						{#each overview?.visibility_breakdown ?? [] as source (`${source.platform}:${source.metric}:${source.basis}`)}
+							<li>
+								{getPlatformName(source.platform)} · {source.basis === 'post_displays'
+									? m.analytics_visibility_post_displays()
+									: source.basis === 'video_views'
+										? m.analytics_visibility_video_views()
+										: m.analytics_visibility_content_views()}: {formatNumber(source.value)} · {m.analytics_destination_coverage(
+									{ measured: source.measured, total: destinationCount }
+								)}
+							</li>
+						{/each}
+						{#each overview?.performance?.filter((item) => item.visibility.measured < item.published) ?? [] as account (account.account_id)}
+							<li>
+								{formatSocialAccountLabel(account.username, account.platform)}: {m.analytics_destination_coverage(
+									{ measured: account.visibility.measured, total: account.published }
+								)} · {account.status === 'unsupported'
+									? m.analytics_unsupported()
+									: account.status === 'permission_required'
+										? m.analytics_permission_required()
+										: account.status === 'rate_limited'
+											? m.analytics_rate_limited()
+											: account.status === 'failed'
+												? m.analytics_collection_failed()
+												: m.analytics_evidence_unavailable()}
+							</li>
+						{/each}
+					</ul>
+					<p>{m.analytics_metric_definitions()}</p>
+					<p>
+						{chartMetric === 'followers'
+							? m.analytics_daily_followers_description()
+							: chartMetric === 'engagement'
+								? m.analytics_daily_engagement_description()
+								: m.analytics_outcome_period()}
+					</p>
+					<p>
+						{chartMetric === 'followers'
+							? m.analytics_follower_chart_legend()
+							: m.analytics_content_chart_legend()}
+					</p>
+					<p>{m.analytics_insights_description()}</p>
+				</div>
+			</Popover.Content>
+		</Popover.Root>
+
+		<Button
+			variant="outline"
+			size="icon-sm"
+			onclick={refreshAnalytics}
+			disabled={!overview || accounts.length === 0 || analyticsAllDisabled}
+			aria-busy={refreshing}
+			aria-disabled={refreshing || undefined}
+			aria-label={refreshing ? m.analytics_refreshing() : m.analytics_refresh()}
+			title={refreshing ? m.analytics_refreshing() : m.analytics_refresh()}
+			data-testid="analytics-refresh"
+		>
+			<ThemeIcon
+				role="refresh"
+				class={refreshing ? 'size-4 animate-spin motion-reduce:animate-none' : 'size-4'}
+			/>
+		</Button>
+	</div>
+{/snippet}
+
+{#if toastMessage}
+	<AppToast
+		message={toastMessage}
+		onDismiss={() => (toastMessage = '')}
+		dismissLabel={m.common_dismiss()}
+		tone={toastTone}
+	/>
+{/if}
+
+<PageContainer
+	title={m.analytics_title()}
+	themeIconRole="analytics"
+	{actions}
+	loading={initialLoading}
+	loadingMessage={m.common_loading()}
+	loadingLayout="sections"
+	loadingItems={5}
+>
+	{#if analyticsEmptyIsFeatureDisabled}
+		<EmptyState
+			themeIconRole="users"
+			title={m.analytics_feature_disabled_title()}
+			description={m.analytics_feature_disabled_description()}
+			actionLabel={m.feature_disabled_open_details()}
+			actionHref="/settings?tab=accounts"
+			size="lg"
+		/>
+		{#if analyticsReason}
+			<p
+				class="mt-3 text-xs leading-5 text-muted-foreground"
+				data-testid="analytics-disabled-reason"
+			>
+				{analyticsReason}
+			</p>
+		{/if}
+	{:else if error}
+		<InlineNotice tone="error" message={error}>
+			{#snippet actions()}
+				<Button variant="outline" size="sm" onclick={() => void analyticsQuery.refetch()}>
+					{m.common_retry()}
+				</Button>
+			{/snippet}
+		</InlineNotice>
+	{:else if accounts.length === 0}
+		<EmptyState
+			themeIconRole="users"
+			title={m.analytics_no_accounts_title()}
+			description={m.analytics_no_accounts_description()}
+			actionLabel={m.analytics_no_accounts_action()}
+			actionHref="/settings?tab=accounts"
+			size="lg"
+		/>
+	{:else}
+		<div class="space-y-6 transition-opacity" class:opacity-70={loading} aria-busy={loading}>
+			{#if backgroundError}
+				<InlineNotice tone="error" message={backgroundError}>
+					{#snippet actions()}
+						<Button variant="outline" size="sm" onclick={retryReads}>{m.common_retry()}</Button>
+					{/snippet}
+				</InlineNotice>
+			{/if}
+
+			<div class="space-y-1">
+				<p class="text-sm text-foreground">
+					{m.analytics_period_lead({
+						range: rangeLabel,
+						accounts: scopedAccounts.length,
+						destinations: destinationCount
+					})}
+				</p>
+				{#if displayedSummary}
+					<p class="text-xs text-muted-foreground">
+						{m.analytics_destination_coverage({
+							measured: displayedSummary.engagement?.measured ?? 0,
+							total: destinationCount
+						})}
+						·
+						{m.analytics_account_coverage({
+							measured: displayedSummary.followers?.measured ?? 0,
+							total: scopedAccounts.length
+						})}
+					</p>
+				{/if}
+			</div>
+
+			<section aria-label={m.analytics_title()}>
+				<div
+					class="grid grid-cols-2 gap-3 sm:grid-cols-4"
+					role="group"
+					aria-label={m.analytics_chart_metric_label()}
+				>
+					{#each featuredSummaryMetrics as item (item.key)}
+						<button
+							type="button"
+							class="min-w-0 rounded-xl border border-border bg-card p-4 text-left text-card-foreground transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+							class:border-primary={chartMetric === item.key}
+							aria-pressed={chartMetric === item.key}
+							onclick={() => (chartMetric = item.key as ChartMetric)}
+							data-testid="analytics-tile-{item.key}"
+						>
+							<div class="flex items-start justify-between gap-3">
+								<div class="flex items-center gap-2 text-sm text-muted-foreground">
+									{#if item.key === 'followers'}
+										<ThemeIcon role="users" class="size-4" />
+									{:else if item.key === 'engagement'}
+										<ThemeIcon role="favorite" class="size-4" />
+									{:else}
+										<ThemeIcon role="eye" class="size-4" />
+									{/if}
+									<span>{item.label}</span>
+								</div>
+								{#if item.metric.delta !== undefined}
+									<span
+										class={[
+											'text-xs font-medium tabular-nums',
+											item.metric.delta >= 0 ? 'text-success-foreground' : 'text-destructive'
+										]}
+									>
+										{item.metric.delta >= 0 ? '+' : ''}{formatNumber(item.metric.delta)}
+									</span>
+								{/if}
+							</div>
+							<p class="mt-5 text-3xl font-semibold tracking-[-0.03em] tabular-nums">
+								<AnalyticsNumber value={item.metric.measured > 0 ? item.metric.value : null} />
+							</p>
+						</button>
+					{/each}
+					<div class="min-w-0 rounded-xl border border-border bg-card p-4 text-card-foreground">
+						<div class="flex items-center gap-2 text-sm text-muted-foreground">
+							<ThemeIcon role="send" class="size-4" />
+							<span>{m.analytics_distinct_posts()}</span>
+						</div>
+						<p class="mt-5 text-3xl font-semibold tracking-[-0.03em] tabular-nums">
+							<AnalyticsNumber value={overview?.publication_total ?? 0} />
+						</p>
+					</div>
+				</div>
+				{#if secondarySummaryMetrics.length}
+					<p class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+						{#each secondarySummaryMetrics as item (item.key)}
+							<span
+								>{item.label}
+								<strong class="font-medium text-foreground tabular-nums"
+									>{metricValue(item.metric)}</strong
+								></span
+							>
+						{/each}
+					</p>
+				{/if}
+			</section>
+
+			<section
+				class="min-w-0 rounded-xl border border-border bg-card text-card-foreground"
+				aria-label={chartTitle}
+			>
+				<div class="p-2 pt-3 sm:p-4">
+					<AnalyticsPerformanceChart
+						points={chartPoints}
+						metric={chartMetric}
+						label={chartTitle}
+						emptyLabel={m.analytics_no_daily_changes()}
+						otherLabel={chartMetric === 'followers'
+							? m.analytics_other_accounts()
+							: m.analytics_other_posts()}
+						formatValue={formatNumber}
+						formatDate={formatShortDate}
+					/>
+				</div>
+			</section>
+
+			<section
+				class="rounded-xl border bg-card p-4 sm:p-5"
+				aria-labelledby="analytics-composition-heading"
+			>
+				<div class="mb-3">
+					<SectionHeading level={2} size="section" id="analytics-composition-heading">
+						{m.analytics_audience_title()}
+					</SectionHeading>
+				</div>
+				<AnalyticsAccountComposition
+					accounts={scopedAccounts}
+					formatValue={formatNumber}
+					{accountLabel}
+				/>
+			</section>
+
+			<AnalyticsAccountPerformance
+				items={overview?.performance ?? []}
+				onselect={(id) => selectAccounts([id])}
+				formatValue={formatNumber}
+			/>
+			<AnalyticsPostHighlights
+				{canEdit}
+				items={overview?.highlights ?? []}
+				busy={Boolean(repurposingReferenceKey)}
+				onrepurpose={repurposeContent}
+				formatValue={formatNumber}
+			/>
+			{#if analyticsInsights.length}
+				<section
+					class="rounded-xl border border-border"
+					aria-labelledby="analytics-insights-heading"
+				>
+					<div class="border-b border-border px-4 py-3">
+						<SectionHeading level={2} size="section" id="analytics-insights-heading">
+							{m.analytics_insights_title()}
+						</SectionHeading>
+					</div>
+					<div class="analytics-insights-grid grid gap-px overflow-hidden rounded-b-xl bg-border">
+						{#each analyticsInsights as insight (insight.kind)}
+							{@const identity = insightIdentity(insight)}
+							<article
+								class="min-w-0 bg-card p-4"
+								data-testid={`analytics-insight-${insight.kind}`}
+							>
+								<p class="text-sm font-semibold">{insightTitle(insight)}</p>
+								{#if identity}
+									<SocialAccountIdentity
+										class="mt-2"
+										name={identity.name}
+										platform={identity.platform}
+										avatarUrl={identity.avatarUrl}
+										detail={insightBody(insight)}
+									/>
+								{:else if insightHasRanking(insight) && insight.content}
+									<p class="mt-2 text-xl font-semibold tabular-nums">
+										{formatNumber(insight.value)}
+									</p>
+									{#if insight.content.reference.publication_id}
+										<a
+											href={resolve('/publications/[id]', {
+												id: insight.content.reference.publication_id
+											})}
+											class="mt-1 line-clamp-2 text-sm leading-5 text-muted-foreground hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+											>{contentLabel(insight.content)}</a
+										>
+									{:else}<p class="mt-1 line-clamp-2 text-sm leading-5 text-muted-foreground">
+											{contentLabel(insight.content)}
+										</p>{/if}
+								{:else}
+									<p class="mt-2 line-clamp-3 text-sm leading-5 text-muted-foreground">
+										{insightBody(insight)}
+									</p>
+								{/if}
+								<Disclosure
+									summary={m.analytics_evidence_details()}
+									summaryClass="text-xs text-muted-foreground hover:text-foreground"
+									class="mt-2 border-t border-border pt-1"
+								>
+									<p class="pb-2 text-xs leading-5 text-muted-foreground">{insightBody(insight)}</p>
+									<dl class="space-y-1 pb-2 text-xs leading-5 text-muted-foreground">
+										<div class="flex flex-wrap gap-x-1">
+											<dt>{m.analytics_evidence_availability()}:</dt>
+											<dd>{availabilityLabel(insight.status)}</dd>
+										</div>
+										<div class="flex flex-wrap gap-x-1">
+											<dt>{m.analytics_evidence_metric()}:</dt>
+											<dd>{insightMetricLabel(insight)}</dd>
+										</div>
+										<div class="flex flex-wrap gap-x-1">
+											<dt>{m.analytics_evidence_unit()}:</dt>
+											<dd>{m.analytics_evidence_count()}</dd>
+										</div>
+										<div class="flex flex-wrap gap-x-1">
+											<dt>{m.analytics_evidence_aggregation()}:</dt>
+											<dd>{aggregationLabel(insight.period.aggregation)}</dd>
+										</div>
+										<div class="flex flex-wrap gap-x-1">
+											<dt>{insightPeriodLabel(insight)}:</dt>
+											<dd>{insightPeriod(insight)}</dd>
+										</div>
+										<div class="flex flex-wrap gap-x-1">
+											<dt>{m.analytics_insight_sample_label()}:</dt>
+											<dd>{insightSample(insight)}</dd>
+										</div>
+										<div class="flex flex-wrap gap-x-1">
+											<dt>{m.analytics_evidence_collection()}:</dt>
+											<dd>
+												{insight.content?.collected_at
+													? formatDateTime(insight.content.collected_at)
+													: m.analytics_not_collected()}
+											</dd>
+										</div>
+										{#if insight.destination_count !== undefined}
+											<div class="flex flex-wrap gap-x-1">
+												<dt>{m.analytics_insight_destinations_label()}:</dt>
+												<dd>{insight.destination_count}</dd>
+											</div>
+										{/if}
+									</dl>
+									{#if insight.content}
+										<div
+											class="space-y-1 border-t border-border py-2 text-xs leading-5 text-muted-foreground"
+										>
+											<p class="flex items-center gap-2">
+												<PlatformIcon
+													platform={insight.content.platform}
+													class="size-3.5 shrink-0"
+												/>
+												<span>{getPlatformName(insight.content.platform)}</span>
+											</p>
+										</div>
+									{/if}
+									{#if insightCaveat(insight)}
+										<p class="border-t border-border py-2 text-xs leading-5 text-muted-foreground">
+											{insightCaveat(insight)}
+										</p>
+									{/if}
+								</Disclosure>
+							</article>
+						{/each}
+					</div>
+				</section>
+			{/if}
+
+			<section aria-labelledby="analytics-content-heading">
+				<div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+					<div class="min-w-0">
+						<SectionHeading level={2} size="section" id="analytics-content-heading">
+							{m.analytics_content_title()}
+						</SectionHeading>
+					</div>
+					<div class="flex min-w-0 shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
+						<Select.Root
+							type="single"
+							value={sortMode}
+							onValueChange={(value) => (sortMode = value as AnalyticsSortMode)}
+						>
+							<Select.Trigger
+								class="h-11 w-full sm:h-9 sm:w-44"
+								aria-label={m.analytics_sort_label()}
+							>
+								{sortMode === 'visibility'
+									? m.analytics_visibility()
+									: sortMode === 'newest'
+										? m.analytics_sort_newest()
+										: sortMode === 'views'
+											? m.analytics_sort_views()
+											: m.analytics_sort_engagement()}
+							</Select.Trigger>
+							<Select.Content>
+								<Select.Item value="visibility">{m.analytics_visibility()}</Select.Item>
+								<Select.Item value="engagement">{m.analytics_sort_engagement()}</Select.Item>
+								<Select.Item value="views">{m.analytics_sort_views()}</Select.Item>
+								<Select.Item value="newest">{m.analytics_sort_newest()}</Select.Item>
+							</Select.Content>
+						</Select.Root>
+					</div>
+				</div>
+				{#if contentItems.length === 0}
+					<p class="border-y border-dashed border-border py-8 text-sm text-muted-foreground">
+						{m.analytics_content_empty()}
+					</p>
+				{:else}
+					<div class="overflow-hidden rounded-xl border border-border">
+						<div
+							data-testid="analytics-content-table-header"
+							class="analytics-content-grid analytics-content-table-header hidden gap-4 border-b border-border bg-muted/30 px-4 py-2.5 text-xs font-medium text-muted-foreground"
+							aria-hidden="true"
+						>
+							<span class="analytics-post">{m.analytics_table_post()}</span>
+							<span class="analytics-destination">{m.analytics_table_platforms()}</span>
+							<span class="analytics-engagement text-end">{m.analytics_summary_engagement()}</span>
+							<span class="analytics-views text-end">{m.analytics_visibility()}</span>
+							<span class="analytics-published hidden">{m.analytics_table_published()}</span>
+							<span class="analytics-actions sr-only">{m.analytics_table_actions()}</span>
+						</div>
+						<div class="divide-y divide-border">
+							{#each contentItems as item (contentIdentity(item))}
+								{@const id = contentIdentity(item)}
+								{@const expanded = expandedContentID === id}
+								{@const itemEvidence = metricEvidence(item)}
+								<article data-testid="analytics-content-row">
+									<div class="analytics-content-grid grid min-w-0 gap-x-3 gap-y-2 px-3 py-3">
+										<div class="analytics-post min-w-0 text-sm">
+											{#if item.reference.publication_id}
+												<a
+													href={resolve('/publications/[id]', {
+														id: item.reference.publication_id
+													})}
+													class="line-clamp-2 font-medium hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+													>{contentLabel(item)}</a
+												>
+											{:else}
+												<p class="line-clamp-2 font-medium">{contentLabel(item)}</p>
+											{/if}
+											<p class="analytics-mobile-date mt-1 text-xs text-muted-foreground">
+												{formatDate(item.published_at)}
+											</p>
+										</div>
+										<div
+											class="analytics-destination flex min-w-0 items-center gap-2 text-sm"
+											data-testid="analytics-row-destinations"
+										>
+											<span
+												class={item.platform === 'youtube'
+													? 'flex shrink-0 items-center justify-center'
+													: 'flex size-7 shrink-0 items-center justify-center rounded-full border border-border bg-background'}
+											>
+												{#if item.platform === 'youtube'}
+													<span class="text-xs">YouTube</span>
+												{:else}
+													<PlatformIcon platform={item.platform} class="size-3.5" />
+												{/if}
+											</span>
+											{#if item.platform !== 'youtube' || renditionName(item) !== 'YouTube'}
+												<span class="min-w-0">
+													<span class="block truncate text-xs">{renditionName(item)}</span>
+												</span>
+											{/if}
+										</div>
+										<div
+											class="analytics-metric analytics-engagement flex items-baseline justify-between gap-2 text-sm"
+										>
+											<span class="analytics-row-label text-xs text-muted-foreground"
+												>{m.analytics_summary_engagement()}</span
+											>
+											<span class="font-medium tabular-nums"
+												>{hasEngagementMeasurement(item)
+													? formatNumber(item.engagement)
+													: '-'}</span
+											>
+										</div>
+										<div
+											class="analytics-metric analytics-views flex items-baseline justify-between gap-2 text-sm"
+										>
+											<span class="analytics-row-label text-xs text-muted-foreground"
+												>{m.analytics_visibility()}</span
+											>
+											<span class="font-medium tabular-nums"
+												>{item.visibility ? formatNumber(item.visibility.value) : '-'}</span
+											>
+										</div>
+										<div class="analytics-published hidden text-sm text-muted-foreground">
+											<span class="analytics-row-label">{m.analytics_table_published()}: </span>
+											{formatDate(item.published_at)}
+										</div>
+										<div class="analytics-actions flex w-full items-center justify-end gap-1">
+											{#if canEdit}
+												<Button
+													variant="ghost"
+													size="sm"
+													disabled={Boolean(repurposingReferenceKey)}
+													onclick={() => repurposeContent(item)}
+													data-testid={`analytics-repurpose-${id}`}
+												>
+													{repurposingReferenceKey === id
+														? m.analytics_repurposing()
+														: m.analytics_repurpose()}
+												</Button>
+											{/if}
+											<Button
+												variant="ghost"
+												size="icon-sm"
+												aria-label={expanded
+													? m.analytics_hide_details()
+													: m.analytics_show_details()}
+												title={expanded ? m.analytics_hide_details() : m.analytics_show_details()}
+												aria-expanded={expanded}
+												aria-controls={`analytics-content-${id.replace(':', '-')}`}
+												onclick={() => (expandedContentID = expanded ? '' : id)}
+												data-testid={`analytics-details-${id}`}
+											>
+												<ThemeIcon
+													role="chevron-down"
+													class={`size-4 transition-transform motion-reduce:transition-none ${expanded ? 'rotate-180' : ''}`}
+												/>
+											</Button>
+										</div>
+									</div>
+									{#if expanded}
+										<div
+											id={`analytics-content-${id.replace(':', '-')}`}
+											class="border-t border-border bg-muted/20 px-4 py-3"
+										>
+											{#if itemEvidence.length}
+												<div class="divide-y divide-border border-y border-border">
+													{#each itemEvidence as metric (metric.key)}
+														<div class="py-3 text-xs leading-5">
+															<div class="flex flex-wrap items-baseline justify-between gap-x-3">
+																<p class="font-medium">{metric.label}</p>
+																<p class="font-semibold tabular-nums">{metric.value}</p>
+															</div>
+															<dl class="mt-1 grid gap-x-4 text-muted-foreground sm:grid-cols-2">
+																<div class="flex flex-wrap gap-x-1">
+																	<dt>{m.analytics_evidence_availability()}:</dt>
+																	<dd>{availabilityLabel(metric.availability)}</dd>
+																</div>
+																<div class="flex flex-wrap gap-x-1">
+																	<dt>{m.analytics_evidence_unit()}:</dt>
+																	<dd>{metricUnit(metric.metadata)}</dd>
+																</div>
+																<div class="flex flex-wrap gap-x-1">
+																	<dt>{m.analytics_evidence_aggregation()}:</dt>
+																	<dd>{aggregationLabel(metric.metadata?.aggregation)}</dd>
+																</div>
+																<div class="flex flex-wrap gap-x-1">
+																	<dt>{m.analytics_evidence_period()}:</dt>
+																	<dd>{metricPeriod(metric.metadata)}</dd>
+																</div>
+																<div class="flex flex-wrap gap-x-1 sm:col-span-2">
+																	<dt>{m.analytics_evidence_collection()}:</dt>
+																	<dd>
+																		{metric.collectedAt
+																			? formatDateTime(metric.collectedAt)
+																			: m.analytics_not_collected()}
+																	</dd>
+																</div>
+															</dl>
+															{#if metricCaveat(metric.metadata?.aggregation)}
+																<p class="mt-1 text-muted-foreground">
+																	{metricCaveat(metric.metadata?.aggregation)}
+																</p>
+															{/if}
+														</div>
+													{/each}
+												</div>
+											{:else}
+												<p class="border-y border-border py-3 text-xs text-muted-foreground">
+													{m.analytics_evidence_availability()}: {availabilityLabel(
+														item.metric_availability
+													)}
+												</p>
+											{/if}
+											<div
+												class="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-border pt-3 text-xs text-muted-foreground"
+											>
+												<span
+													>{m.analytics_collected_at({
+														date: item.collected_at
+															? formatDateTime(item.collected_at)
+															: m.analytics_not_collected()
+													})}</span
+												>
+												{#if contentStatus(item)}<span>{contentStatus(item)}</span>{/if}
+												{#if item.external_url}
+													<Button
+														href={item.external_url}
+														target="_blank"
+														rel="noreferrer"
+														variant="ghost"
+														size="sm"
+													>
+														{m.analytics_open_native()}<ThemeIcon
+															role="external-link"
+															class="size-3.5"
+														/>
+													</Button>
+												{/if}
+											</div>
+										</div>
+									{/if}
+								</article>
+							{/each}
+						</div>
+					</div>
+					<div class="mt-4 flex flex-wrap items-center justify-between gap-3">
+						<div class="text-xs leading-5 text-muted-foreground">
+							<p>
+								{m.analytics_results_range_stored({
+									shown: contentItems.length,
+									total: overview?.content_total ?? contentItems.length
+								})}
+							</p>
+						</div>
+						{#if overview?.content_next_cursor}
+							<Button variant="outline" onclick={loadMoreContent} disabled={loadingMore}>
+								{loadingMore ? m.analytics_loading_more() : m.analytics_load_more()}
+							</Button>
+						{/if}
+					</div>
+				{/if}
+			</section>
+
+			{#if overview?.last_synced_at}
+				<p class="text-xs text-muted-foreground">
+					{m.analytics_last_updated({ date: formatDateTime(overview.last_synced_at) })}
+				</p>
+			{/if}
+		</div>
+	{/if}
+</PageContainer>
+
+<style>
+	.analytics-insights-grid {
+		grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+	}
+
+	.analytics-content-grid {
+		grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+		grid-template-areas: 'post post' 'destination actions' 'engagement views';
+		align-items: center;
+	}
+	.analytics-post {
+		grid-area: post;
+	}
+	.analytics-destination {
+		grid-area: destination;
+	}
+	.analytics-engagement {
+		grid-area: engagement;
+	}
+	.analytics-views {
+		grid-area: views;
+	}
+	.analytics-published {
+		grid-area: published;
+	}
+	.analytics-actions {
+		grid-area: actions;
+	}
+
+	@container (min-width: 40rem) {
+		.analytics-content-grid {
+			grid-template-columns: minmax(0, 1fr) 7rem 5.5rem 4rem 9rem;
+			grid-template-areas: 'post destination engagement views actions';
+		}
+		.analytics-content-table-header {
+			display: grid;
+		}
+		.analytics-metric {
+			display: block;
+			text-align: end;
+		}
+		.analytics-row-label {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			padding: 0;
+			margin: -1px;
+			overflow: hidden;
+			clip: rect(0, 0, 0, 0);
+			white-space: nowrap;
+			border: 0;
+		}
+	}
+	@container (min-width: 58rem) {
+		.analytics-content-grid {
+			grid-template-columns: minmax(0, 2fr) minmax(7rem, 1fr) 5.5rem 4rem 7rem 9rem;
+			grid-template-areas: 'post destination engagement views published actions';
+		}
+		.analytics-mobile-date {
+			display: none;
+		}
+		.analytics-published {
+			display: block;
+		}
+	}
+</style>

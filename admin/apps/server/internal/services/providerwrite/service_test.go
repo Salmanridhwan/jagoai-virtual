@@ -1,0 +1,430 @@
+package providerwrite
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"net/http"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	_ "github.com/mattn/go-sqlite3"
+	"github.com/openpost/backend/internal/models"
+	"github.com/openpost/backend/internal/platform"
+	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/dialect/sqlitedialect"
+)
+
+func TestAcceptedCheckpointPreventsReplayAfterLocalFailure(t *testing.T) {
+	db := newProviderWriteTestDB(t)
+	service := New(db)
+	input := providerWriteTestInput(t, "accepted-once")
+	var calls atomic.Int32
+
+	result, err := service.Execute(t.Context(), input, func(_ context.Context, control *Control) (platform.PublishResult, error) {
+		calls.Add(1)
+		require.NoError(t, control.Begin(platform.PublishResult{ProviderState: "create_post", RetrySafety: platform.PublishRetryNever}))
+		accepted := platform.AcceptedPublishResult("external-1")
+		require.NoError(t, control.Checkpoint(accepted))
+		return accepted, fmt.Errorf("local status update failed after provider acceptance")
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "external-1", result.ExternalID)
+
+	result, err = service.Execute(t.Context(), input, func(context.Context, *Control) (platform.PublishResult, error) {
+		calls.Add(1)
+		return platform.PublishResult{}, nil
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "external-1", result.ExternalID)
+	require.Equal(t, int32(1), calls.Load(), "an accepted external write must never be replayed")
+}
+
+func TestAmbiguousWriteIsTerminalWithoutReconciliation(t *testing.T) {
+	db := newProviderWriteTestDB(t)
+	service := New(db)
+	input := providerWriteTestInput(t, "ambiguous")
+	var calls atomic.Int32
+	send := func(_ context.Context, control *Control) (platform.PublishResult, error) {
+		calls.Add(1)
+		require.NoError(t, control.Begin(platform.PublishResult{ProviderState: "create_post", RetrySafety: platform.PublishRetryNever}))
+		return platform.PublishResult{}, context.DeadlineExceeded
+	}
+
+	_, err := service.Execute(t.Context(), input, send, nil)
+	require.Error(t, err)
+	require.True(t, IsAmbiguous(err))
+	_, err = service.Execute(t.Context(), input, send, nil)
+	require.Error(t, err)
+	require.True(t, IsAmbiguous(err))
+	require.Equal(t, int32(1), calls.Load())
+
+	attempt := latestProviderWriteAttempt(t, db, input.OperationID)
+	require.Equal(t, StatusAmbiguous, attempt.Status)
+	require.Equal(t, string(platform.PublishRetryNever), attempt.RetrySafety)
+	require.Empty(t, attempt.SafeErrorCode)
+}
+
+func TestClassifiedRejectionOverridesPendingCheckpoint(t *testing.T) {
+	db := newProviderWriteTestDB(t)
+	service := New(db)
+	input := providerWriteTestInput(t, "rejected-after-checkpoint")
+	pending := platform.PublishResult{
+		SubmissionState:   platform.PublishSubmissionPending,
+		ProviderState:     "instagram:v1:story_container_create_started",
+		ProviderReference: "ig1:u:0:-:-",
+		RetrySafety:       platform.PublishRetryReconcileOnly,
+		ReconcileAfter:    time.Minute,
+	}
+	_, err := service.Execute(t.Context(), input, func(_ context.Context, control *Control) (platform.PublishResult, error) {
+		require.NoError(t, control.Begin(pending))
+		require.NoError(t, control.Checkpoint(pending))
+		rejected := pending
+		rejected.SubmissionState = platform.PublishSubmissionRejected
+		rejected.RetrySafety = platform.PublishRetryNever
+		return rejected, &platform.HTTPError{StatusCode: http.StatusBadRequest, Code: "100"}
+	}, nil)
+	require.Error(t, err)
+
+	attempt := latestProviderWriteAttempt(t, db, input.OperationID)
+	require.Equal(t, StatusDefiniteFailure, attempt.Status)
+	require.Equal(t, string(platform.PublishSubmissionRejected), attempt.SubmissionState)
+	require.Equal(t, "provider_rejected", attempt.SafeErrorClass)
+	require.Equal(t, "100", attempt.SafeErrorCode)
+	require.Equal(t, http.StatusBadRequest, attempt.ErrorHTTPStatus)
+}
+
+func TestStoredMetaFailureReconstructsCodeAndSubcodeForReplay(t *testing.T) {
+	db := newProviderWriteTestDB(t)
+	service := New(db)
+	input := providerWriteTestInput(t, "stored-meta-subcode")
+	pending := platform.PublishResult{
+		SubmissionState:   platform.PublishSubmissionPending,
+		ProviderState:     "publish",
+		ProviderReference: "meta-write-1",
+		RetrySafety:       platform.PublishRetryReconcileOnly,
+	}
+	sendCalls := 0
+	send := func(_ context.Context, control *Control) (platform.PublishResult, error) {
+		sendCalls++
+		require.NoError(t, control.Begin(pending))
+		require.NoError(t, control.Checkpoint(pending))
+		return pending, nil
+	}
+	_, err := service.Execute(t.Context(), input, send, nil)
+	require.Error(t, err)
+
+	metaFailure := &platform.HTTPError{
+		StatusCode: http.StatusBadRequest,
+		Code:       "meta:nonexistent:100:33",
+		Subcode:    "33",
+	}
+	_, err = service.Execute(t.Context(), input, send, func(context.Context, string) (platform.PublishResult, error) {
+		return platform.PublishResult{SubmissionState: platform.PublishSubmissionRejected}, metaFailure
+	})
+	require.Error(t, err)
+	attempt := latestProviderWriteAttempt(t, db, input.OperationID)
+	require.Equal(t, StatusDefiniteFailure, attempt.Status)
+	require.Equal(t, "meta:nonexistent:100:33:subcode:33", attempt.SafeErrorCode)
+
+	_, err = service.Execute(t.Context(), input, func(context.Context, *Control) (platform.PublishResult, error) {
+		sendCalls++
+		return platform.PublishResult{}, nil
+	}, nil)
+	var replayed *platform.HTTPError
+	require.ErrorAs(t, err, &replayed)
+	require.Equal(t, "meta:nonexistent:100:33", replayed.Code)
+	require.Equal(t, "33", replayed.Subcode)
+	require.Equal(t, http.StatusBadRequest, replayed.StatusCode)
+	require.Equal(t, 1, sendCalls, "a never-retry Meta rejection must not be sent again")
+}
+
+func TestSplitStoredProviderErrorCodeLeavesUnboundedOrAmbiguousLegacyValuesOpaque(t *testing.T) {
+	for _, value := range []string{
+		"legacy:provider:code",
+		"meta:subcode:old:subcode:33",
+		strings.Repeat("x", 97) + ":subcode:33",
+		"meta:nonexistent:100:33:subcode:bad value",
+	} {
+		code, subcode := splitStoredProviderErrorCode(value)
+		require.Equal(t, value, code)
+		require.Empty(t, subcode)
+	}
+}
+
+func TestAcceptedCheckpointSurvivesLaterMeta10033ErrorWithoutReplay(t *testing.T) {
+	db := newProviderWriteTestDB(t)
+	service := New(db)
+	input := providerWriteTestInput(t, "accepted-meta-error")
+	var calls atomic.Int32
+	result, err := service.Execute(t.Context(), input, func(_ context.Context, control *Control) (platform.PublishResult, error) {
+		calls.Add(1)
+		require.NoError(t, control.Begin(platform.PublishResult{ProviderState: "publish", RetrySafety: platform.PublishRetryNever}))
+		accepted := platform.AcceptedPublishResult("external-accepted")
+		require.NoError(t, control.Checkpoint(accepted))
+		return accepted, &platform.HTTPError{StatusCode: http.StatusBadRequest, Code: "meta:nonexistent:100:33", Subcode: "33"}
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "external-accepted", result.ExternalID)
+
+	result, err = service.Execute(t.Context(), input, func(context.Context, *Control) (platform.PublishResult, error) {
+		calls.Add(1)
+		return platform.PublishResult{}, nil
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "external-accepted", result.ExternalID)
+	require.Equal(t, int32(1), calls.Load())
+	require.Equal(t, StatusAccepted, latestProviderWriteAttempt(t, db, input.OperationID).Status)
+}
+
+func TestAcceptedWriteWithoutNativeIDFailsAmbiguousForManualResolution(t *testing.T) {
+	db := newProviderWriteTestDB(t)
+	service := New(db)
+	input := providerWriteTestInput(t, "accepted-without-id")
+
+	var calls atomic.Int32
+	send := func(_ context.Context, control *Control) (platform.PublishResult, error) {
+		calls.Add(1)
+		require.NoError(t, control.Begin(platform.PublishResult{ProviderState: "create_post", RetrySafety: platform.PublishRetryNever}))
+		accepted := platform.AcceptedPublishResult("")
+		require.NoError(t, control.Checkpoint(accepted))
+		return accepted, nil
+	}
+	_, err := service.Execute(t.Context(), input, send, nil)
+	require.Error(t, err)
+	require.True(t, IsAmbiguous(err), "expected a terminal ambiguous error, got %v", err)
+	require.Equal(t, int32(1), calls.Load())
+
+	attempt := latestProviderWriteAttempt(t, db, input.OperationID)
+	require.Equal(t, StatusAmbiguous, attempt.Status)
+	require.Equal(t, string(platform.PublishRetryNever), attempt.RetrySafety)
+	require.Equal(t, DeliveryManualResolution, deliveryState(attempt))
+	require.Equal(t, RecoveryManualResolution, DeliveryRecoveryAction(models.ProviderDelivery{
+		State: DeliveryManualResolution, RetrySafety: attempt.RetrySafety,
+	}))
+
+	_, err = service.Execute(t.Context(), input, send, nil)
+	require.Error(t, err)
+	require.True(t, IsAmbiguous(err), "an id-less acceptance must never be replayed, got %v", err)
+	require.Equal(t, int32(1), calls.Load(), "an id-less acceptance must never be replayed")
+}
+
+func TestAcceptedWriteWithoutIDButWithReferenceStaysAccepted(t *testing.T) {
+	db := newProviderWriteTestDB(t)
+	service := New(db)
+	input := providerWriteTestInput(t, "accepted-with-reference")
+
+	result, err := service.Execute(t.Context(), input, func(_ context.Context, control *Control) (platform.PublishResult, error) {
+		require.NoError(t, control.Begin(platform.PublishResult{ProviderState: "publish", RetrySafety: platform.PublishRetryNever}))
+		accepted := platform.AcceptedPublishResult("")
+		accepted.ProviderReference = "instagram:container-1"
+		require.NoError(t, control.Checkpoint(accepted))
+		return accepted, nil
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, platform.PublishSubmissionAccepted, result.SubmissionState)
+
+	attempt := latestProviderWriteAttempt(t, db, input.OperationID)
+	require.Equal(t, StatusAccepted, attempt.Status)
+}
+
+func TestOperationFingerprintCannotChangeAfterAnAttemptExists(t *testing.T) {
+	db := newProviderWriteTestDB(t)
+	service := New(db)
+	input := providerWriteTestInput(t, "immutable-fingerprint")
+	_, err := service.Execute(t.Context(), input, func(_ context.Context, control *Control) (platform.PublishResult, error) {
+		require.NoError(t, control.Begin(platform.PublishResult{ProviderState: "create_post", RetrySafety: platform.PublishRetryNever}))
+		return platform.AcceptedPublishResult("external-1"), nil
+	}, nil)
+	require.NoError(t, err)
+
+	changed := input
+	changed.PayloadFingerprint = "sha256:changed"
+	_, err = service.Execute(t.Context(), changed, func(context.Context, *Control) (platform.PublishResult, error) {
+		t.Fatal("a changed operation must not reach the provider")
+		return platform.PublishResult{}, nil
+	}, nil)
+	require.ErrorIs(t, err, ErrOperationChanged)
+}
+
+func TestConcurrentExecutionEntersTheFenceOnce(t *testing.T) {
+	db := newProviderWriteTestDB(t)
+	service := New(db)
+	input := providerWriteTestInput(t, "concurrent")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	firstDone := make(chan error, 1)
+	var calls atomic.Int32
+
+	go func() {
+		_, err := service.Execute(context.Background(), input, func(_ context.Context, control *Control) (platform.PublishResult, error) {
+			calls.Add(1)
+			if err := control.Begin(platform.PublishResult{ProviderState: "create_post", RetrySafety: platform.PublishRetryNever}); err != nil {
+				return platform.PublishResult{}, err
+			}
+			close(started)
+			<-release
+			return platform.AcceptedPublishResult("external-1"), nil
+		}, nil)
+		firstDone <- err
+	}()
+	<-started
+
+	_, err := service.Execute(t.Context(), input, func(context.Context, *Control) (platform.PublishResult, error) {
+		calls.Add(1)
+		return platform.PublishResult{}, nil
+	}, nil)
+	require.Error(t, err)
+	require.True(t, IsAmbiguous(err))
+	close(release)
+	require.NoError(t, <-firstDone)
+	require.Equal(t, int32(1), calls.Load())
+}
+
+func TestStaleWorkerAttemptBecomesAmbiguousBeforeJobRecovery(t *testing.T) {
+	db := newProviderWriteTestDB(t)
+	service := New(db)
+	now := time.Now().UTC()
+	require.NoError(t, func() error {
+		_, err := db.NewInsert().Model(&models.Job{
+			ID: "job-stale", Type: "publish_publication", Status: "processing",
+			Payload: `{}`, LockedAt: now.Add(-20 * time.Minute), RunAt: now,
+		}).Exec(t.Context())
+		return err
+	}())
+	input := providerWriteTestInput(t, "stale")
+	input.JobID = "job-stale"
+	attempt, err := service.loadOrCreateAttempt(t.Context(), input)
+	require.NoError(t, err)
+	require.NoError(t, (&Control{service: service, attempt: attempt, ctx: t.Context()}).Begin(
+		platform.PublishResult{ProviderState: "create_post", RetrySafety: platform.PublishRetryNever},
+	))
+
+	count, err := service.MarkStaleJobAttempts(t.Context(), now.Add(-15*time.Minute))
+	require.NoError(t, err)
+	require.Equal(t, int64(1), count)
+	stored := latestProviderWriteAttempt(t, db, input.OperationID)
+	require.Equal(t, StatusAmbiguous, stored.Status)
+	require.Equal(t, "worker_interrupted", stored.SafeErrorClass)
+}
+
+func newProviderWriteTestDB(t *testing.T) *bun.DB {
+	t.Helper()
+	sqlDB, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?mode=memory&cache=shared&_busy_timeout=5000", uuid.NewString()))
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(8)
+	db := bun.NewDB(sqlDB, sqlitedialect.New())
+	for _, model := range []interface{}{(*models.ProviderWriteAttempt)(nil), (*models.Job)(nil)} {
+		_, err = db.NewCreateTable().Model(model).IfNotExists().Exec(t.Context())
+		require.NoError(t, err)
+	}
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	return db
+}
+
+func providerWriteTestInput(t *testing.T, operationID string) Input {
+	t.Helper()
+	fingerprint, err := Fingerprint("test", map[string]string{"content": "never persisted"})
+	require.NoError(t, err)
+	return Input{
+		OperationID: operationID, WorkspaceID: "workspace-1",
+		SocialAccountID: "account-1", TargetKey: "x", Provider: "x",
+		Operation: "publish", PayloadFingerprint: fingerprint,
+	}
+}
+
+func latestProviderWriteAttempt(t *testing.T, db *bun.DB, operationID string) models.ProviderWriteAttempt {
+	t.Helper()
+	var attempt models.ProviderWriteAttempt
+	require.NoError(t, db.NewSelect().Model(&attempt).
+		Where("operation_id = ?", operationID).
+		Order("attempt_number DESC").Limit(1).Scan(t.Context()))
+	return attempt
+}
+
+func TestTikTokInboxReceiptRetainsUserActionAcrossReconciliation(t *testing.T) {
+	service := New(newProviderWriteTestDB(t))
+	input := providerWriteTestInput(t, "tiktok-inbox")
+	input.Provider = "tiktok"
+	pending := platform.PublishResult{SubmissionState: platform.PublishSubmissionPending, ProviderState: "inbox_delivered", ProviderReference: "receipt-1", RetrySafety: platform.PublishRetryReconcileOnly, ReconcileAfter: 15 * time.Minute}
+	_, err := service.Execute(t.Context(), input, func(_ context.Context, control *Control) (platform.PublishResult, error) {
+		require.NoError(t, control.Begin(pending))
+		return pending, nil
+	}, nil)
+	var outcome *OutcomeError
+	require.ErrorAs(t, err, &outcome)
+	require.Equal(t, "inbox_delivered", outcome.ProviderState)
+	attempt := latestProviderWriteAttempt(t, service.db, input.OperationID)
+	require.Equal(t, DeliveryAwaitingUser, deliveryState(attempt))
+	_, updateErr := service.db.NewUpdate().Model((*models.ProviderWriteAttempt)(nil)).Set("reconcile_after = ?", time.Now().UTC().Add(-time.Minute)).Where("operation_id = ?", input.OperationID).Exec(t.Context())
+	require.NoError(t, updateErr)
+	result, err := service.Execute(t.Context(), input, func(context.Context, *Control) (platform.PublishResult, error) {
+		t.Fatal("inbox upload must not be repeated")
+		return platform.PublishResult{}, nil
+	}, func(_ context.Context, reference string) (platform.PublishResult, error) {
+		require.Equal(t, "receipt-1", reference)
+		return platform.AcceptedPublishResult("741234"), nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, "741234", result.ExternalID)
+	require.Equal(t, DeliveryLive, deliveryState(latestProviderWriteAttempt(t, service.db, input.OperationID)))
+}
+
+func TestProviderWriteFenceAcceptsHeartbeatButRejectsAReclaimedLease(t *testing.T) {
+	for _, reclaimed := range []bool{false, true} {
+		t.Run(fmt.Sprint(reclaimed), func(t *testing.T) {
+			db := newProviderWriteTestDB(t)
+			input := providerWriteTestInput(t, "lease")
+			input.JobID = "lease-job"
+			started := time.Now().UTC().Add(-6 * time.Minute)
+			_, err := db.NewInsert().Model(&models.Job{ID: input.JobID, Type: "publish_publication", Status: "processing", LockedAt: started, LockedBy: "worker", LeaseGeneration: 1}).Exec(t.Context())
+			require.NoError(t, err)
+			ctx := WithJobExecution(t.Context(), input.JobID, 0, started, 1)
+			generation := 1
+			if reclaimed {
+				generation = 2
+			}
+			_, err = db.NewUpdate().Model((*models.Job)(nil)).Set("locked_at=?", time.Now().UTC()).Set("lease_generation=?", generation).Where("id=?", input.JobID).Exec(t.Context())
+			require.NoError(t, err)
+			calls := 0
+			_, err = New(db).Execute(ctx, input, func(_ context.Context, control *Control) (platform.PublishResult, error) {
+				if err := control.Begin(platform.PublishResult{RetrySafety: platform.PublishRetryNever}); err != nil {
+					return platform.PublishResult{}, err
+				}
+				calls++
+				return platform.AcceptedPublishResult("native-id"), nil
+			}, nil)
+			if reclaimed {
+				require.Error(t, err)
+				require.Zero(t, calls)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, 1, calls)
+			}
+		})
+	}
+}
+
+func TestGuardedWriteRejectsNativeCancellationBeforeDispatch(t *testing.T) {
+	db := newProviderWriteTestDB(t)
+	input := providerWriteTestInput(t, "native-cancelled")
+	calls := 0
+	_, err := New(db).Execute(t.Context(), input, func(_ context.Context, control *Control) (platform.PublishResult, error) {
+		err := control.BeginGuarded(platform.PublishResult{RetrySafety: platform.PublishRetryNever}, func(_ context.Context, _ bun.Tx) error {
+			// The owning service checks current native state within the write fence.
+			return fmt.Errorf("automatic reply stopped before sending")
+		})
+		if err != nil {
+			return platform.PublishResult{}, err
+		}
+		calls++
+		return platform.AcceptedPublishResult("should-not-send"), nil
+	}, nil)
+	require.ErrorContains(t, err, "stopped before sending")
+	require.Zero(t, calls)
+	require.NotEqual(t, StatusSending, latestProviderWriteAttempt(t, db, input.OperationID).Status)
+}

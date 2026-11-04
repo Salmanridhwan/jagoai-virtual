@@ -1,0 +1,14 @@
+{
+  "pages": [
+    "index",
+    "guides",
+    "self-hosting",
+    "mcp",
+    "workflows",
+    "automate",
+    "video-editor",
+    "image-editor",
+    "api-reference"
+  ],
+  "defaultOpen": true
+}

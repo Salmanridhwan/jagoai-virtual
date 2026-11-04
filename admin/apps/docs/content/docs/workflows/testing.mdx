@@ -1,0 +1,27 @@
+---
+title: Test previews, nodes, and live runs
+description: Run previews, test single nodes, and start live runs safely.
+icon: FlaskConical
+---
+
+Start with **Run preview** to check fields and branches. Fetch real source data or test a single node when you need to verify an integration.
+
+## Preview the path
+
+**Run preview** resolves your fields and conditions using example outputs for native actions. It creates no posts, invokes no AI generation, queues no replies, and skips waits and approvals. Metric values, HTTP responses, and AI decisions in a preview are examples.
+
+## Test one node
+
+**Test node** makes a real call for the selected HTTP, feed, or AI node, or executes a data transformation. Later steps do not run. It uses the data shown in the inspector and records the result in run history. HTTP writes can change the remote service, and AI calls record usage. Node tests require a workspace administrator.
+
+**Fetch an example** reads the source without starting a run or advancing which future items will start runs.
+
+## Start a live run
+
+**Run live** performs the saved draft's configured actions using the sample input currently shown. Use it only when you intend those actions to occur. It can create posts or queue work even while automatic runs are paused.
+
+## Activate automatic runs
+
+[Activate the workflow](/workflows/triggers#activate-or-pause) once previews look right. Publishing activates the saved definition for future trigger events; it does not publish a social post by itself.
+
+Use [Inspect and stop runs](/workflows/runs) to inspect the result and [Review and schedule posts](/workflows/review-and-schedule) when the run reaches approval.

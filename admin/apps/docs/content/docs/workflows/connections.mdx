@@ -1,0 +1,28 @@
+---
+title: Call APIs with saved connections
+description: Save credentials in Connections and call external APIs over HTTP.
+icon: Plug
+---
+
+Open **Connections** from the Workflows library to save credentials. Administrator access is required. GitHub tokens, Bearer tokens, API key headers, and Basic authentication are supported. Saved secret values are encrypted and cannot be viewed again.
+
+## Call an API
+
+1. Save the credential with the API's exact HTTPS host.
+2. Add **HTTP request**, enter the URL, and select the connection.
+3. Set the method, query, headers, body, timeout, and response format. You can import a cURL request, then check the parsed fields.
+4. Start with a read-only `GET` and [test the node](/workflows/testing).
+
+Keep authentication in Connections. cURL import rejects shell commands, local file reads, and unsupported flags.
+
+Requests reject private-network destinations. The maximum timeout is 30 seconds; saved response data is limited to 256 KiB.
+
+An interrupted request stops for inspection. Check the remote service before running it again because the write may already have succeeded.
+
+## Private GitHub repositories
+
+Save a GitHub token with access to the intended repository and permission to read its contents. Select that connection on the trigger. Public repositories need no credentials.
+
+## Replace or delete a connection
+
+Replace its credential through **Connections**. Before deleting it, remove it from workflow drafts and pause active revisions that use it.

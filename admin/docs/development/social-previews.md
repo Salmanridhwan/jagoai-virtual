@@ -1,0 +1,66 @@
+# Social previews
+
+`packages/social-preview` owns post cards and page shells for the composer and public preview tools. The composer maps a rendition into `PreviewModel`; marketing creates the same model from local inputs. Keep provider-specific rendering in this package so both surfaces show the same post.
+
+Preview support is separate from publishing readiness. Reddit is a preview-only platform. Pinterest and Google Business Profile previews do not enable their gated publishing integrations. Server capabilities remain authoritative for account-specific publishing limits.
+
+## Rendering contract
+
+- Page navigation responds to the preview container width, not the host viewport. Keep mobile navigation inside that container.
+- `scheme` accepts `system`, `light`, or `dark`. Explicit schemes override the host application's appearance.
+- Authored text detects direction with `dir="auto"`; multiline post bodies use `unicode-bidi: plaintext` and `text-align: start` for independent paragraph direction. Isolate inline author names with `bdi`. Keep card controls in the interface direction and preserve the original text without inserting directional characters.
+- Preserve the selected output format, the destination's segment strategy, per-segment settings, and explicitly empty media arrays. Joined destinations use the same trimmed text and combined attachments as publication delivery.
+- Use supplied image dimensions when available and intrinsic dimensions otherwise. Selected feed, carousel, multi-image, Story, Reel, and video profiles take precedence over attachment inference. Project supported covers, cover frames and focal points from effective account settings, and deduplicate joined attachments in source order, retaining the first item metadata. A missing ratio must not permanently force portrait media into a landscape crop.
+- Shared capability counts describe verified preview limits. Unspecified limits can vary by instance or client; public tools must label their own input limits and never silently discard uploads.
+- Navigation and neighboring content illustrate a platform. Only real preview interactions, such as carousel navigation and content-warning disclosure, should look operable.
+
+The Threads preview limit is 20 mixed images or videos, matching [Meta's published carousel contract](https://www.postman.com/meta/threads/documentation/dht3nzz/threads-api). Unverified limits remain labeled as preview-tool limits, rather than publishing guarantees.
+
+PDF pages load PDF.js on demand. Both application Vite configs enable `pdfPreviewAssets()` from `packages/social-preview/pdf-assets.ts`, which ships the installed PDF.js character maps, fonts, decoders, and licenses under `/pdfjs/<version>/`. Keep those files on the same origin and match the renderer version; documents fetch them only when needed.
+
+## Composer editing
+
+The All tab keeps the shared editor. Account tabs share their row with a linked/unlinked control, Full preview, and More. The link control snapshots text and media when detached and restores shared inheritance when linked; provider poll and link settings remain independent. Explicit unlink retains overrides even when values match All. Display sync from actual text and media inheritance, including platform captions, rather than variant-record presence. The native post card starts directly below; text reset lives in More. Account editors supply `PreviewEditing` snippets for text, titles, cards, and polls. The shared package owns placement and read-only fallback; the composer owns mutations through its existing text, media, poll, and provider-setting actions. Full preview opens the read-only page shell. Accounts without a native renderer retain caption editing in a neutral fallback.
+
+Typing inherited text creates only that account's text override. Media and provider settings remain independent. Joined outputs edit canonical source slices through `source_overrides`; generated poll text remains separate from authored captions. Provider-specific captions, such as YouTube descriptions and Facebook Reel descriptions, use the adapter's actual setting owner.
+
+Card and poll editors stage changes until Save. Cancel and Escape discard them and restore focus. Account-resolved fields control which settings are editable. LinkedIn article metadata belongs inside the card, while its poll question remains separate from post text. Unsupported polls require a saved text or omit choice and retain their notice. Text versions retain authored language without adding engagement prompts.
+
+Canonical segment `settings.link.destinations[accountID]` owns the URL choice: `post` detects the first HTTP(S) URL in authored account text, `custom` keeps an explicit URL, and `legacy` preserves earlier native URI settings. Missing link state preserves legacy behavior. Adoption checks both destination and segment settings, retaining other accounts' explicit URLs. Balanced parentheses in URLs survive detection.
+
+`services/publicationlink` resolves provider settings at persistence, validation, and delivery using effective destination and segment settings. It suppresses inherited cards that conflict with media, Bluesky quotes, or polls; explicit conflicting Bluesky cards remain validation errors. Generated native URI values are projections excluded from authorship comparisons. Removing canonical link ownership clears its generated segment values, preserving legacy settings and card metadata.
+
+## Reference baseline
+
+Reviewed on 26 September 2026, and again on 30 October 2026 for the Reddit, Pinterest, TikTok photo, PeerTube, Lemmy, PieFed, and /dev/null cards and pages. Logged-in Brave observations informed X, Threads, Facebook, Instagram, and LinkedIn web layouts; the Telegram channel web preview (`t.me/s/<channel>`), a live PeerTube instance, and the public dev-null.sh log informed those cards. Account experiments, app versions, locales, native apps, fonts, and federated instance themes can differ. These previews estimate presentation; they do not guarantee published output.
+
+| Platform or behavior                        | Primary reference                                                                                                                                                                              |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| X photos and grids                          | [Posting pictures](https://help.x.com/en/using-x/posting-gifs-and-pictures), [posting limits](https://help.x.com/en/using-x/how-to-post)                                                       |
+| Threads web columns and feeds               | [Meta web update](https://about.fb.com/news/2025/04/new-features-threads-web-experience/), checked against the current logged-in interface                                                     |
+| Bluesky attachments                         | [Creating a post](https://docs.bsky.app/docs/tutorials/creating-a-post)                                                                                                                        |
+| LinkedIn image collections                  | [Sharing photos or videos](https://www.linkedin.com/help/linkedin/answer/a527229/share-photos-or-videos?lang=en)                                                                               |
+| Mastodon warnings and instance limits       | [Posting](https://docs.joinmastodon.org/user/posting/), [instance configuration](https://docs.joinmastodon.org/entities/Instance/)                                                             |
+| Discord attachment mosaics                  | [File attachments](https://support.discord.com/hc/en-us/articles/25444343291031-File-Attachments-FAQ)                                                                                          |
+| Telegram albums                             | [Albums](https://telegram.org/blog/albums-saved-messages), [file API](https://core.telegram.org/api/files)                                                                                     |
+| TikTok photo posts                          | [Content Posting API](https://developers.tiktok.com/doc/content-posting-api-reference-photo-post)                                                                                              |
+| Pinterest pin media and shape               | [Create a Pin](https://help.pinterest.com/en-gb/article/create-a-pin-from-an-image-or-video), [Pin formats](https://create.pinterest.com/en-ca/product-features/how-to-create-pins/)           |
+| Reddit posts and galleries                  | [Posting](https://support.reddithelp.com/hc/en-us/articles/360060422572-How-do-I-post-and-comment-on-Reddit), [image galleries](https://redditinc.com/news/introducing-reddit-image-galleries) |
+| Google Business updates, events, and offers | [Create posts](https://support.google.com/business/answer/7342169?hl=en)                                                                                                                       |
+| /dev/null commit cards and the log page     | [dev-null.sh](https://dev-null.sh/) and its [open-source repository](https://github.com/dev-null-sh/dev-null.sh)                                                                               |
+
+Open-source interfaces were consulted as behavioral references: [Bluesky](https://github.com/bluesky-social/social-app), [Lemmy](https://github.com/LemmyNet/lemmy-ui), [PeerTube](https://github.com/Chocobozzz/PeerTube), [Pixelfed](https://github.com/pixelfed/pixelfed), and [PieFed](https://codeberg.org/rimu/pyfedi). Their shallow checkouts live under `docs/references/` (`lemmy-ui`, `peertube`, `pixelfed`, `piefed`). No interface source was copied. Reddit and Google glyph paths come from [Simple Icons](https://github.com/simple-icons/simple-icons), under [CC0](https://github.com/simple-icons/simple-icons/blob/develop/LICENSE.md); Pinterest reuses the existing repository glyph.
+
+When updating fidelity, compare real cards containing text, links, polls, multiple images, portrait media, and warnings. Check cards and full pages at 320px, 390px, and desktop widths in both schemes. Keep regression tests at the renderer, composer mapping, or browser-flow boundary that owns the behavior.
+
+## Generated text cards
+
+Instagram and Pixelfed text cards use the deterministic Go renderer in `internal/textcards`. Capability planning and rendering share its layout and pagination. `services/publicationcards` snapshots JPEGs through `BlobStorage` during the publication mutation; delivery uses the existing media upload and provider receipt owners.
+
+`text_card` and `text_card_*` are destination settings. New supported destinations default to `text_only`; legacy missing values remain off. Social Sets copy these defaults when creating posts, including with Automatic format selection. `always` prepends cards to the deduplicated attachments in canonical order. Joined source versions retain `source_overrides`. Generated images count toward native format limits; unsupported formats such as Reels do not convert.
+
+The media role and provenance `text_card` are internal generated state. Rendition segment `media` exposes authored attachments for editing; `output_media` exposes the complete delivery sequence. Never put generated cards into canonical media, source overrides, or client mutation inputs. Authorship revisions must not change merely because an image was rendered.
+
+Persisted previews use saved `output_media` until relevant text, attachment count, layout or style changes. The read-only preview endpoint and MCP tool share the publishing renderer, but a preview request does not create library assets. Identity is the connected account's alias or username, handle and bounded profile photo. Do not fetch provider content during publication reads.
+
+Rendering uses the repository's embedded fonts, a 2,200-character bound, at most ten cards, and cancellable per-image work. Failed database mutations compensate new blob writes. Replaced cards are retired through the media lifecycle owner once no post, editor, or library organization retains them. Storage admission counts the replacement after retirement, excluding internal design and template previews. Keep incomplete drafts editable, but reject publishing when required card generation or native media validation fails.

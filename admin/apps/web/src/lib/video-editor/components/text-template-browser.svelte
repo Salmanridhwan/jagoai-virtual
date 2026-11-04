@@ -1,0 +1,337 @@
+<!-- Text recipes adapted from FreeCut's MIT-licensed media sidebar. -->
+<script lang="ts">
+	import LibraryShelf from './library-shelf.svelte';
+	import type { ProjectAssetImporter } from '../media/types';
+	import { videoLibrary } from '../library/library-store.svelte';
+	import LibraryFavorite from './library-favorite.svelte';
+	import { m } from '$lib/paraglide/messages';
+	import { Input } from '$lib/components/ui/input';
+	import { ProtectedIcon } from '$lib/themes/icons';
+	import { addTextItem, addTextTemplateItem } from '$lib/video-editor/timeline/actions/items';
+	import { applyTextStylePreset } from '$lib/video-editor/timeline/actions/text-layout';
+	import { timelineStore } from '$lib/video-editor/timeline/stores/timeline-store.svelte';
+	import { isTrackEffectivelyLocked } from '$lib/video-editor/timeline/utils/track-groups';
+	import { editorSession } from '$lib/video-editor/editor.svelte';
+	import { TEXT_STYLE_PRESETS, type TextStylePresetLayout } from '../typography/text-style-presets';
+	import { localizedTextStylePresetCopy } from '../typography/text-style-preset-copy';
+	import {
+		clearGeneratedItemDragData,
+		textGeneratedItemDragData,
+		writeGeneratedItemDragData
+	} from '$lib/video-editor/timeline/generated-item-drag';
+
+	let {
+		oninserted,
+		importAsset,
+		selectedTextItemId = null,
+		onapplied = () => {}
+	}: {
+		oninserted: (itemId: string) => void;
+		importAsset?: ProjectAssetImporter;
+		selectedTextItemId?: string | null;
+		onapplied?: () => void;
+	} = $props();
+	const selectedTextItem = $derived(
+		selectedTextItemId ? timelineStore.itemById.get(selectedTextItemId) : undefined
+	);
+	const selectedTextItemLocked = $derived(
+		selectedTextItem
+			? isTrackEffectivelyLocked(selectedTextItem.trackId, timelineStore.tracks)
+			: false
+	);
+
+	let search = $state('');
+	const searchQuery = $derived(search.trim().toLocaleLowerCase());
+	const addTextVisible = $derived(
+		`${m.video_editor_text_layout_single()} ${m.video_editor_add_text()}`
+			.toLocaleLowerCase()
+			.includes(searchQuery)
+	);
+	const groups: Array<{ layout: TextStylePresetLayout; label: () => string }> = [
+		{ layout: 'single', label: m.video_editor_text_layout_single },
+		{ layout: 'two', label: m.video_editor_text_layout_two },
+		{ layout: 'three', label: m.video_editor_text_layout_three }
+	];
+	const filteredGroups = $derived(
+		groups
+			.map((group) => ({
+				...group,
+				presets: TEXT_STYLE_PRESETS.filter(
+					(preset) =>
+						preset.layout === group.layout &&
+						`${group.label()} ${localizedTextStylePresetCopy(preset.id).label}`
+							.toLocaleLowerCase()
+							.includes(searchQuery)
+				)
+			}))
+			.filter((group) => group.presets.length > 0 || (group.layout === 'single' && addTextVisible))
+	);
+
+	function insertPlainText(): void {
+		oninserted(addTextItem(m.video_editor_text_default_label()));
+	}
+
+	function usePreset(presetId: (typeof TEXT_STYLE_PRESETS)[number]['id']): void {
+		const copy = localizedTextStylePresetCopy(presetId);
+		if (selectedTextItem?.type === 'text') {
+			if (selectedTextItemLocked) return;
+			if (
+				applyTextStylePreset(
+					selectedTextItem.id,
+					presetId,
+					{
+						width: editorSession.project?.metadata.width ?? 1920,
+						height: editorSession.project?.metadata.height ?? 1080
+					},
+					1,
+					copy
+				)
+			) {
+				onapplied();
+				videoLibrary.recordChoice(
+					`${videoLibrary.scope}:text:${presetId}`,
+					TEXT_STYLE_PRESETS.find((preset) => preset.id === presetId)?.label ?? presetId
+				);
+			}
+			return;
+		}
+		oninserted(addTextTemplateItem(presetId, copy));
+		videoLibrary.recordChoice(
+			`${videoLibrary.scope}:text:${presetId}`,
+			TEXT_STYLE_PRESETS.find((preset) => preset.id === presetId)?.label ?? presetId
+		);
+	}
+
+	function startDrag(
+		event: DragEvent,
+		label: string,
+		presetId?: (typeof TEXT_STYLE_PRESETS)[number]['id']
+	): void {
+		if (!event.dataTransfer) return;
+		writeGeneratedItemDragData(event.dataTransfer, textGeneratedItemDragData(label, presetId));
+	}
+</script>
+
+<div
+	class="text-browser min-h-0 flex-1 overflow-y-auto p-2"
+	role="group"
+	aria-label={m.video_editor_text_templates()}
+>
+	<LibraryShelf
+		kind="text"
+		selectedIds={selectedTextItemId ? [selectedTextItemId] : []}
+		{oninserted}
+		onedit={onapplied}
+		{importAsset}
+	/>
+	<Input
+		type="search"
+		bind:value={search}
+		placeholder={m.video_editor_text_templates_search()}
+		aria-label={m.video_editor_text_templates_search()}
+		class="mb-2 h-[25px] text-xs [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:text-base"
+	/>
+	{#if filteredGroups.length === 0}<p class="text-xs text-muted-foreground" role="status">
+			{m.video_editor_text_templates_no_results()}
+		</p>{/if}
+	{#each filteredGroups as group (group.layout)}
+		<section class="mb-4 last:mb-0">
+			<h3
+				class="mb-2 text-[10px] font-semibold tracking-[0.12em] text-[var(--video-editor-muted)] uppercase"
+			>
+				{group.label()}
+			</h3>
+			<div class="template-grid">
+				{#if group.layout === 'single' && addTextVisible}
+					<button
+						type="button"
+						class="template-card w-full"
+						draggable="true"
+						onclick={insertPlainText}
+						ondragstart={(event) => startDrag(event, m.video_editor_text_default_label())}
+						ondragend={clearGeneratedItemDragData}
+						aria-label={m.video_editor_add_text()}
+					>
+						<span class="template-canvas add-text" aria-hidden="true">
+							<ProtectedIcon icon="editor-text" class="size-4 opacity-70" />
+							<span>{m.video_editor_text_default_label()}</span>
+						</span>
+						<span class="template-name">{m.video_editor_add_text()}</span>
+					</button>
+				{/if}
+				{#each group.presets as preset (preset.id)}
+					{@const copy = localizedTextStylePresetCopy(preset.id)}
+					<div class="group/library-item relative min-w-0">
+						<button
+							type="button"
+							class="template-card w-full"
+							draggable="true"
+							onclick={() => usePreset(preset.id)}
+							ondragstart={(event) => startDrag(event, copy.label, preset.id)}
+							ondragend={clearGeneratedItemDragData}
+							aria-label={selectedTextItem?.type === 'text'
+								? m.video_editor_text_apply_template({ name: copy.label })
+								: `${m.video_editor_add_text()}: ${copy.label}`}
+							aria-pressed={selectedTextItem?.type === 'text'
+								? selectedTextItem.textStylePresetId === preset.id
+								: undefined}
+							disabled={selectedTextItemLocked}
+						>
+							<span class="template-canvas" data-kind={preset.previewKind} aria-hidden="true">
+								{#if copy.sample.eyebrow}<span class="eyebrow">{copy.sample.eyebrow}</span>{/if}
+								<span class="title">{copy.sample.title}</span>
+								{#if copy.sample.subtitle}<span class="subtitle">{copy.sample.subtitle}</span>{/if}
+							</span>
+							<span class="template-name"
+								>{selectedTextItem?.type === 'text'
+									? m.video_editor_text_apply_template({ name: copy.label })
+									: copy.label}</span
+							>
+						</button>
+						<LibraryFavorite
+							catalogId={`text:${preset.id}`}
+							name={copy.label}
+							recipe={{ kind: 'text', presetId: preset.id }}
+						/>
+					</div>
+				{/each}
+			</div>
+		</section>
+	{/each}
+</div>
+
+<style>
+	.text-browser {
+		container-type: inline-size;
+		scrollbar-color: var(--video-editor-border) transparent;
+		scrollbar-width: thin;
+	}
+	.template-grid {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 0.375rem;
+	}
+	@container (min-width: 360px) {
+		.template-grid {
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+		}
+	}
+	.template-card {
+		min-width: 0;
+		border: 1px solid var(--video-editor-border);
+		border-radius: 0.5rem;
+		padding: 0.25rem;
+		text-align: left;
+		color: var(--video-editor-muted);
+		background: var(--video-editor-control);
+		cursor: grab;
+	}
+	.template-card:active {
+		cursor: grabbing;
+	}
+	.template-card:hover,
+	.template-card:focus-visible {
+		border-color: var(--video-editor-focus-border);
+		background: var(--video-editor-control-hover);
+		color: var(--video-editor-text);
+	}
+	.template-card:focus-visible {
+		outline: 2px solid var(--video-editor-focus);
+		outline-offset: 1px;
+	}
+	.template-canvas {
+		display: flex;
+		aspect-ratio: 16 / 9;
+		width: 100%;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		overflow: hidden;
+		border: 1px solid oklch(0.3 0.02 260);
+		border-radius: 0.3rem;
+		background: #020617;
+		padding: 0.25rem;
+		color: white;
+		line-height: 1;
+	}
+	.template-canvas.add-text {
+		gap: 0.2rem;
+		font-size: 0.45rem;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: #94a3b8;
+	}
+	.template-canvas .eyebrow {
+		font-size: 0.34rem;
+		font-weight: 700;
+		letter-spacing: 0.1em;
+		color: #fbbf24;
+	}
+	.template-canvas .title {
+		font-size: 0.58rem;
+		font-weight: 700;
+	}
+	.template-canvas .subtitle {
+		margin-top: 0.15rem;
+		font-size: 0.36rem;
+		color: #cbd5e1;
+	}
+	.template-canvas[data-kind='lower-third'],
+	.template-canvas[data-kind='speaker'] {
+		align-items: flex-start;
+		justify-content: flex-end;
+		background: #111827;
+		padding-inline: 0.45rem;
+	}
+	.template-canvas[data-kind='poster'] .title {
+		font-size: 0.76rem;
+		font-weight: 400;
+		text-transform: uppercase;
+		color: #fef3c7;
+		text-shadow: 0 2px 8px #7f1d1d;
+	}
+	.template-canvas[data-kind='outline-pill'] .title,
+	.template-canvas[data-kind='badge'] .title {
+		border: 1px solid #38bdf8;
+		border-radius: 999px;
+		padding: 0.25rem 0.4rem;
+		font-size: 0.4rem;
+		letter-spacing: 0.08em;
+	}
+	.template-canvas[data-kind='cinematic'] .title {
+		font-weight: 400;
+		letter-spacing: 0.18em;
+		color: #f8e6b8;
+	}
+	.template-canvas[data-kind='quote'] {
+		background: #1f2937;
+		font-family: 'Playfair Display Variable', serif;
+		font-style: italic;
+	}
+	.template-canvas[data-kind='neon'] {
+		background: #082f49;
+		color: #67e8f9;
+		text-shadow: 0 0 6px #22d3ee;
+	}
+	.template-canvas[data-kind='breaking'] .eyebrow,
+	.template-canvas[data-kind='event'] .eyebrow {
+		color: #fca5a5;
+	}
+	.template-canvas[data-kind='launch'] .eyebrow {
+		color: #67e8f9;
+	}
+	.template-name {
+		display: block;
+		overflow: hidden;
+		padding: 0.2rem 0.125rem 0.1rem;
+		font-size: 0.5625rem;
+		text-align: center;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	@media (pointer: coarse) {
+		.template-card {
+			min-height: 5.5rem;
+		}
+	}
+</style>

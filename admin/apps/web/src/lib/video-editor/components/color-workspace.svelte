@@ -1,0 +1,516 @@
+<script lang="ts">
+	import { onDestroy, onMount, type Snippet } from 'svelte';
+	import { Input } from '$lib/components/ui/input';
+	import { StatusLine } from '$lib/components/editor-density';
+	import { ThemeIcon, ProtectedIcon } from '$lib/themes/icons';
+	import EditorColorComparison from '$lib/components/editor-color-comparison.svelte';
+	import { m } from '$lib/paraglide/messages';
+	import { timelineStore } from '$lib/video-editor/timeline/stores/timeline-store.svelte';
+	import {
+		autoBalanceFromFrame,
+		blackPointFromPick,
+		hasEnabledColorGrade,
+		luma601,
+		snapshotColorGrade,
+		whiteBalanceFromPick,
+		whitePointFromPick,
+		type GradeEffectSnapshot
+	} from '$lib/video-editor/effects/color-grade';
+	import {
+		colorPreviewStore,
+		type ColorComparisonMode,
+		type ColorPickerKind
+	} from '$lib/video-editor/effects/color-preview-store.svelte';
+	import { scopeSamples } from '$lib/video-editor/effects/scope-samples.svelte';
+	import {
+		loadColorGradePresets,
+		persistColorGradePresets,
+		removeColorGradePreset,
+		saveColorGradePreset,
+		type ColorGradePreset
+	} from '$lib/video-editor/effects/color-grade-presets';
+	import { replaceColorGradeEffects } from '$lib/video-editor/timeline/actions/effects';
+	import { setAnimatedGpuEffectParamsOnItems } from '$lib/video-editor/timeline/actions/keyframes';
+	import { autoKeyframeStore } from '$lib/video-editor/timeline/stores/auto-keyframe-store.svelte';
+	import { isColorGradeTargetEditable } from '$lib/video-editor/effects/color-targets';
+	import { resolveAnimatedEffectsAt } from '$lib/video-editor/effects/effect-keyframes';
+	import { getGpuEffectDefaultParams } from '$lib/video-editor/effects/gpu/registry';
+	import {
+		copyColorGradeFromItem,
+		pasteColorGradeToItems
+	} from '$lib/video-editor/effects/color-grade-clipboard';
+	import ColorPrimaryControls from './color-primary-controls.svelte';
+	import {
+		EDITOR_COLOR_GRADE_PRESETS,
+		editorColorGradePresetLabel,
+		type EditorColorGradePresetID
+	} from '$lib/editor-color-grade/presets';
+	import { defaultEditorColorGradeAdjustments } from '$lib/editor-color-grade/model';
+	import { editorColorGradeAdjustmentsToEffects } from '$lib/editor-color-grade/image-grade';
+
+	let {
+		itemId,
+		itemIds = [],
+		onedit,
+		oncreateadjustment,
+		autoKey = false,
+		onAutoKeyChange = () => undefined,
+		compact = false,
+		primaryActive = true,
+		scrollCompactBody = false,
+		children
+	}: {
+		itemId: string | null;
+		itemIds?: string[];
+		onedit: () => void;
+		oncreateadjustment?: () => void;
+		autoKey?: boolean;
+		onAutoKeyChange?: (enabled: boolean) => void;
+		compact?: boolean;
+		primaryActive?: boolean;
+		scrollCompactBody?: boolean;
+		children?: Snippet;
+	} = $props();
+	let presets = $state<ColorGradePreset[]>([]);
+	let presetName = $state('');
+	let showPresetSave = $state(false);
+	let showGradeTools = $state(false);
+	let showPresets = $state(false);
+	let status = $state('');
+
+	const item = $derived(itemId ? timelineStore.itemById.get(itemId) : undefined);
+	const grade = $derived(snapshotColorGrade(item?.effects));
+	const hasGrade = $derived(hasEnabledColorGrade(item?.effects));
+	const isVisual = $derived(item?.type !== 'audio' && item !== undefined);
+	const selectedVisualItemIds = $derived.by(() => {
+		const requested = itemId && itemIds.includes(itemId) ? itemIds : itemId ? [itemId] : [];
+		return Array.from(new Set(requested)).filter(
+			(id) => timelineStore.itemById.get(id)?.type !== 'audio'
+		);
+	});
+	const editableTargetItemIds = $derived.by(() =>
+		selectedVisualItemIds.filter((id) => {
+			const candidate = timelineStore.itemById.get(id);
+			return candidate !== undefined && isColorGradeTargetEditable(candidate, timelineStore.tracks);
+		})
+	);
+	onMount(() => {
+		presets = loadColorGradePresets();
+	});
+
+	onDestroy(() => {
+		if (colorPreviewStore.activePicker?.itemId === itemId) colorPreviewStore.cancelPick();
+		if (colorPreviewStore.frameCaptureItemId === itemId) colorPreviewStore.cancelFrameCapture();
+	});
+
+	$effect(() => {
+		if (!hasGrade && colorPreviewStore.comparisonMode !== 'after') {
+			colorPreviewStore.setComparisonMode('after');
+		}
+	});
+
+	$effect(() => {
+		const picker = colorPreviewStore.activePicker;
+		if (picker && picker.itemId !== itemId) colorPreviewStore.cancelPick();
+		const captureItemId = colorPreviewStore.frameCaptureItemId;
+		if (captureItemId && captureItemId !== itemId) colorPreviewStore.cancelFrameCapture();
+	});
+
+	function readWheelParam(name: string): number {
+		const defaults = getGpuEffectDefaultParams('gpu-color-wheels');
+		const effect = (
+			item ? resolveAnimatedEffectsAt(item, timelineStore.currentFrame) : undefined
+		)?.find((entry) => entry.type === 'gpu' && entry.effectId === 'gpu-color-wheels');
+		if (!effect || effect.type !== 'gpu') return Number(defaults[name] ?? 0);
+		return Number(effect.params[name] ?? defaults[name] ?? 0);
+	}
+
+	function applyWheelParams(
+		updates: Record<string, number>,
+		message: string,
+		targets: readonly string[] = editableTargetItemIds
+	): void {
+		if (!itemId) return;
+		status = message;
+		if (
+			setAnimatedGpuEffectParamsOnItems(
+				targets,
+				'gpu-color-wheels',
+				timelineStore.currentFrame,
+				updates,
+				(id, property) => autoKey || autoKeyframeStore.isEnabled(id, property)
+			)
+		)
+			onedit();
+	}
+
+	async function autoBalance(): Promise<void> {
+		if (!itemId) return;
+		const targetItemId = itemId;
+		const targetItemIdsAtStart = [...editableTargetItemIds];
+		if (targetItemIdsAtStart.length === 0) return;
+		status = m.video_editor_color_analyzing();
+		const captured = await colorPreviewStore.requestFrameCapture(targetItemId);
+		const fallback = scopeSamples.current;
+		const image =
+			captured ?? (fallback?.itemId === targetItemId ? scopeSamples.readImage(fallback) : null);
+		if (!image || itemId !== targetItemId) {
+			status = m.video_editor_color_sample_unavailable();
+			return;
+		}
+		const updates = autoBalanceFromFrame(image, {
+			lift: readWheelParam('lift'),
+			gain: readWheelParam('gain'),
+			temperature: readWheelParam('temperature'),
+			tint: readWheelParam('tint')
+		});
+		applyWheelParams({ ...updates }, m.video_editor_color_auto_applied(), targetItemIdsAtStart);
+	}
+
+	async function pick(kind: ColorPickerKind): Promise<void> {
+		if (!itemId) return;
+		const targetItemId = itemId;
+		const targetItemIdsAtStart = [...editableTargetItemIds];
+		if (targetItemIdsAtStart.length === 0) return;
+		status = m.video_editor_color_picker_instruction();
+		const picked = await colorPreviewStore.requestPick(targetItemId, kind);
+		if (!picked || itemId !== targetItemId) {
+			status = '';
+			return;
+		}
+		if (kind === 'white-balance') {
+			const correction = whiteBalanceFromPick(
+				picked,
+				readWheelParam('temperature'),
+				readWheelParam('tint')
+			);
+			applyWheelParams(
+				{ ...correction },
+				m.video_editor_color_white_balance_applied(),
+				targetItemIdsAtStart
+			);
+			return;
+		}
+		const pickedLuma = luma601(picked);
+		if (kind === 'black-point') {
+			applyWheelParams(
+				{ lift: blackPointFromPick(pickedLuma, readWheelParam('lift')) },
+				m.video_editor_color_black_point_applied(),
+				targetItemIdsAtStart
+			);
+			return;
+		}
+		applyWheelParams(
+			{ gain: whitePointFromPick(pickedLuma, readWheelParam('gain')) },
+			m.video_editor_color_white_point_applied(),
+			targetItemIdsAtStart
+		);
+	}
+
+	function setComparison(mode: ColorComparisonMode): void {
+		if (mode !== 'after' && !hasGrade) return;
+		colorPreviewStore.setComparisonMode(mode, selectedVisualItemIds);
+	}
+
+	function copyGrade(): void {
+		if (!itemId) return;
+		const result = copyColorGradeFromItem(itemId);
+		if (result) status = m.video_editor_color_grade_copied({ count: result.effectCount });
+	}
+
+	function applyGrade(effects: readonly GradeEffectSnapshot[], message: string): void {
+		if (!itemId || !replaceColorGradeEffects(editableTargetItemIds, effects)) return;
+		status = message;
+		onedit();
+	}
+
+	function pasteGrade(): void {
+		const result = pasteColorGradeToItems(editableTargetItemIds);
+		if (!result) return;
+		status = m.video_editor_color_grade_pasted({ count: result.effectCount });
+		onedit();
+	}
+
+	function savePreset(): void {
+		const next = saveColorGradePreset(presets, presetName, grade);
+		if (next.length === presets.length && next.every((entry, index) => entry === presets[index]))
+			return;
+		if (!persistColorGradePresets(next)) {
+			status = m.video_editor_color_preset_save_failed();
+			return;
+		}
+		presets = next;
+		const saved = presets.find(
+			(preset) => preset.name.toLocaleLowerCase() === presetName.trim().toLocaleLowerCase()
+		);
+		status = m.video_editor_color_preset_saved({ name: saved?.name ?? presetName.trim() });
+		presetName = '';
+		showPresetSave = false;
+	}
+
+	function applyPreset(preset: ColorGradePreset): void {
+		applyGrade(preset.effects, m.video_editor_color_preset_applied({ name: preset.name }));
+	}
+
+	function applyBuiltinPreset(id: EditorColorGradePresetID): void {
+		const preset = EDITOR_COLOR_GRADE_PRESETS.find((candidate) => candidate.id === id);
+		if (!preset) return;
+		const name = editorColorGradePresetLabel(id);
+		const effects = editorColorGradeAdjustmentsToEffects({
+			...defaultEditorColorGradeAdjustments(),
+			...preset.adjustments
+		}).map((effect) => ({ ...effect, enabled: true }));
+		applyGrade(effects, m.video_editor_color_preset_applied({ name }));
+	}
+
+	function deletePreset(preset: ColorGradePreset): void {
+		const next = removeColorGradePreset(presets, preset.id);
+		if (!persistColorGradePresets(next)) {
+			status = m.video_editor_color_preset_delete_failed();
+			return;
+		}
+		presets = next;
+		status = m.video_editor_color_preset_deleted({ name: preset.name });
+	}
+
+	function toggleGradeTools(): void {
+		showGradeTools = !showGradeTools;
+		if (showGradeTools) return;
+		showPresetSave = false;
+		showPresets = false;
+	}
+</script>
+
+{#if isVisual}
+	<section
+		class="editor-density flex h-full min-h-0 flex-col overflow-hidden bg-[var(--video-editor-panel)] {scrollCompactBody
+			? 'short-scroll-workspace'
+			: ''}"
+		aria-label={m.video_editor_color_workspace()}
+	>
+		<div
+			class="shrink-0 border-b border-[var(--video-editor-border)] px-2 {compact
+				? 'py-1'
+				: 'py-1.5'}"
+		>
+			<div class="flex items-center justify-between gap-2 overflow-x-auto">
+				<div class="flex shrink-0 items-center gap-1">
+					<button
+						type="button"
+						class="editor-tool"
+						class:bg-[var(--video-editor-primary)]={autoKey}
+						class:text-[var(--video-editor-primary-text)]={autoKey}
+						aria-pressed={autoKey}
+						title={m.video_editor_shortcuts_command_keyframe_auto()}
+						onclick={() => onAutoKeyChange(!autoKey)}
+					>
+						<span class="size-1.5 rounded-full bg-current" aria-hidden="true"></span>
+						{m.video_editor_shortcuts_command_keyframe_auto()}
+					</button>
+					{#if compact}
+						<button
+							type="button"
+							class="editor-tool"
+							aria-label={m.image_editor_more_actions()}
+							title={m.image_editor_more_actions()}
+							aria-expanded={showGradeTools}
+							onclick={toggleGradeTools}
+						>
+							<ThemeIcon role="more-horizontal" class="size-3.5" />
+						</button>
+					{/if}
+				</div>
+				<EditorColorComparison
+					{compact}
+					mode={colorPreviewStore.comparisonMode}
+					disabled={!hasGrade}
+					showSplit
+					splitPosition={colorPreviewStore.splitPosition}
+					ariaLabel={m.video_editor_color_compare_mode()}
+					afterLabel={m.video_editor_color_after()}
+					beforeLabel={m.video_editor_color_before()}
+					splitLabel={m.video_editor_color_split()}
+					splitPositionLabel={m.video_editor_color_split_position()}
+					onmodechange={setComparison}
+					onsplitpositionchange={(value) => colorPreviewStore.setSplitPosition(value)}
+				/>
+			</div>
+
+			{#if !compact || showGradeTools}
+				<div
+					class="mt-1 flex gap-1 overflow-x-auto"
+					role="group"
+					aria-label={m.video_editor_color_balance()}
+				>
+					<button
+						type="button"
+						class="editor-tool min-w-24 flex-1"
+						disabled={grade.length === 0}
+						onclick={copyGrade}
+					>
+						<ThemeIcon role="copy" class="size-3.5" />{m.video_editor_color_copy_grade()}
+					</button>
+					<button
+						type="button"
+						class="editor-tool min-w-24 flex-1"
+						disabled={!colorPreviewStore.gradeClipboard?.length}
+						onclick={pasteGrade}
+					>
+						<ThemeIcon role="copy" class="size-3.5" />{m.video_editor_color_paste_grade()}
+					</button>
+					{#if oncreateadjustment}
+						<button
+							type="button"
+							class="editor-tool min-w-28 flex-1"
+							title={m.video_editor_adjustment_layer_hint()}
+							onclick={oncreateadjustment}
+						>
+							<ProtectedIcon
+								icon="editor-layers"
+								class="size-3.5"
+							/>{m.video_editor_adjustment_layer()}
+						</button>
+					{/if}
+					<button
+						type="button"
+						class="editor-tool shrink-0"
+						aria-expanded={showPresets}
+						onclick={() => (showPresets = !showPresets)}
+					>
+						{m.video_editor_effects_presets()}
+					</button>
+					<button
+						type="button"
+						class="editor-tool-icon"
+						disabled={grade.length === 0}
+						title={m.video_editor_color_presets()}
+						aria-label={m.video_editor_color_presets()}
+						aria-expanded={showPresetSave}
+						onclick={() => (showPresetSave = !showPresetSave)}
+					>
+						<ThemeIcon role="save" class="size-3.5" />
+					</button>
+				</div>
+			{/if}
+			{#if showPresetSave}
+				<div class="mt-1 grid grid-cols-[1fr_auto] gap-1">
+					<Input
+						class="h-[var(--editor-22,22px)] min-w-0 rounded border border-[var(--video-editor-border)] bg-[var(--video-editor-panel)] px-2 text-xs [@media(pointer:coarse)]:h-11"
+						bind:value={presetName}
+						placeholder={m.video_editor_color_preset_name()}
+						aria-label={m.video_editor_color_preset_name()}
+						onkeydown={(event) => {
+							if (event.key === 'Enter') savePreset();
+							if (event.key === 'Escape') showPresetSave = false;
+						}}
+					/>
+					<button
+						type="button"
+						class="editor-tool-icon"
+						disabled={!presetName.trim() || grade.length === 0}
+						title={m.video_editor_color_save_preset()}
+						aria-label={m.video_editor_color_save_preset()}
+						onclick={savePreset}
+					>
+						<ThemeIcon role="save" class="size-3.5" />
+					</button>
+				</div>
+			{/if}
+			{#if !compact || showPresets}
+				<div class="mt-1" role="group" aria-label={m.video_editor_color_presets()}>
+					<div class="mb-1 text-[9px] tracking-wide text-[var(--video-editor-muted)] uppercase">
+						{m.video_editor_color_presets()}
+					</div>
+					<div class="flex gap-1 overflow-x-auto pb-1">
+						{#each EDITOR_COLOR_GRADE_PRESETS as preset (preset.id)}
+							<button
+								type="button"
+								class="flex h-[25px] min-w-20 shrink-0 items-center gap-1.5 rounded-sm border border-[var(--video-editor-border)] bg-[var(--video-editor-control-hover)] px-2 text-left hover:bg-[var(--video-editor-control-hover)] focus-visible:outline-2 focus-visible:outline-[var(--video-editor-focus)] [@media(pointer:coarse)]:h-11"
+								title={editorColorGradePresetLabel(preset.id)}
+								onclick={() => applyBuiltinPreset(preset.id)}
+							>
+								<span
+									class="size-2 shrink-0 rounded-full bg-gradient-to-r from-slate-500 via-amber-300 to-sky-400"
+									aria-hidden="true"
+								></span>
+								<span class="max-w-16 truncate text-[10px] font-medium"
+									>{editorColorGradePresetLabel(preset.id)}</span
+								>
+							</button>
+						{/each}
+						{#each presets as preset (preset.id)}
+							<div
+								class="group relative min-w-24 rounded-sm border border-[var(--video-editor-border)] bg-[var(--video-editor-control-hover)]"
+							>
+								<button
+									type="button"
+									class="flex h-[25px] w-full items-center gap-1.5 rounded-sm px-2 text-left hover:bg-[var(--video-editor-control-hover)] focus-visible:outline-2 focus-visible:outline-[var(--video-editor-focus)] [@media(pointer:coarse)]:h-11"
+									title={preset.name}
+									onclick={() => applyPreset(preset)}
+								>
+									<span
+										class="size-2 shrink-0 rounded-full bg-gradient-to-r from-slate-500 via-amber-300 to-sky-400"
+										aria-hidden="true"
+									></span>
+									<span class="max-w-20 truncate text-[10px] font-medium">{preset.name}</span>
+								</button>
+								<button
+									type="button"
+									class="absolute top-1 right-1 flex size-5 items-center justify-center rounded-sm bg-[var(--video-editor-control)] text-[var(--video-editor-muted)] opacity-0 group-hover:opacity-100 hover:text-[var(--video-editor-text)] focus:opacity-100 focus-visible:outline-2 focus-visible:outline-[var(--video-editor-focus)]"
+									title={`${m.video_editor_color_delete_preset()}: ${preset.name}`}
+									aria-label={`${m.video_editor_color_delete_preset()}: ${preset.name}`}
+									onclick={(event) => {
+										event.stopPropagation();
+										deletePreset(preset);
+									}}
+								>
+									<ThemeIcon role="delete" class="size-3" />
+								</button>
+							</div>
+						{/each}
+					</div>
+				</div>
+			{/if}
+			{#if status}
+				<StatusLine
+					segments={[status]}
+					live
+					class="mt-0.5 border-t-0 text-[var(--video-editor-muted)]"
+				/>
+			{/if}
+		</div>
+		<div
+			class="flex min-h-0 flex-1 flex-col overflow-hidden {scrollCompactBody
+				? 'short-scroll-workspace-body'
+				: ''}"
+		>
+			{#if primaryActive}
+				<ColorPrimaryControls
+					{itemId}
+					{itemIds}
+					{onedit}
+					onautobalance={() => void autoBalance()}
+					onpick={(kind) => void pick(kind)}
+					forceAutoKey={autoKey}
+					{compact}
+				/>
+			{:else if children}
+				{@render children()}
+			{/if}
+		</div>
+	</section>
+{/if}
+
+<style>
+	@media (max-height: 600px) {
+		.short-scroll-workspace {
+			height: auto;
+			min-height: 100%;
+			overflow: visible;
+		}
+
+		.short-scroll-workspace .short-scroll-workspace-body {
+			overflow: visible;
+		}
+	}
+</style>

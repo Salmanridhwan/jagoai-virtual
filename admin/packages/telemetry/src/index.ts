@@ -1,0 +1,1133 @@
+export type TelemetrySurface = "app" | "marketing" | "docs";
+export type TelemetryPreference = "persistent" | "cookieless" | "off";
+export type TelemetryPreferenceStatus = TelemetryPreference | "undecided" | "unavailable";
+
+export const telemetryConsentCopy = {
+  title: "Cookies",
+  description:
+    "We use our own analytics cookies to understand how OpenPost is used and make it better. No ads or session recordings.",
+  allowLabel: "Accept",
+  offLabel: "Decline",
+  optionsLabel: "More options",
+  cookielessLabel: "Use cookie-free analytics",
+  cookielessDescription:
+    "We can count basic activity without analytics cookies or a personal profile.",
+  privacyLabel: "Details",
+  closeLabel: "Close",
+} as const;
+
+export * from "./chunk-recovery";
+import { extractFirstPartyAssetPath, isChunkLoadError } from "./chunk-recovery";
+
+export const telemetryPreferenceCookie = "openpost_analytics";
+export const telemetryPreferencesEvent = "openpost:telemetry-preferences";
+
+export interface BrowserTelemetryConfig {
+  enabled: boolean;
+  projectToken?: string;
+  apiHost?: string;
+  uiHost?: string;
+  environment: string;
+  edition: string;
+  version?: string;
+  revision?: string;
+  surface: TelemetrySurface;
+}
+
+export { type TelemetryEventMap, type TelemetryEventName } from "./events";
+import {
+  allowlistedEventProperties,
+  containsSensitiveValue,
+  type TelemetryEventMap,
+  type TelemetryEventName,
+} from "./events";
+
+interface BrowserSDK {
+  init(token: string, options: Record<string, unknown>): unknown;
+  capture(event: string, properties?: Record<string, unknown>): unknown;
+  captureException(error: Error, properties?: Record<string, unknown>): unknown;
+  identify(distinctID: string, properties?: Record<string, unknown>): unknown;
+  register(properties: Record<string, unknown>): unknown;
+  reset(): unknown;
+  opt_out_capturing(): unknown;
+  get_distinct_id?(): string;
+  get_session_id?(): string;
+}
+
+export interface TelemetryPreferenceStore {
+  read(): TelemetryPreference | null;
+  write(preference: TelemetryPreference): void;
+  privacySignalEnabled(): boolean;
+  clearSDKState(projectToken: string): void;
+  reload(): void;
+}
+
+type PendingEvent = {
+  name: TelemetryEventName;
+  properties: Record<string, unknown>;
+};
+
+type PendingPageView = { pathname: string };
+type PendingException = { error: Error; properties: Record<string, unknown> };
+type BrowserCaptureEvent = {
+  event: string;
+  properties?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
+const maxPendingEvents = 100;
+const maxRememberedRouteTemplates = 100;
+const resizeObserverDeliveryWarnings = new Set([
+  "ResizeObserver loop completed with undelivered notifications.",
+  "ResizeObserver loop limit exceeded",
+]);
+const contentlessScriptErrors = new Set(["script error", "script error."]);
+
+function warningMessageOf(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (value instanceof Error) return value.message ?? null;
+  if (typeof DOMException !== "undefined" && value instanceof DOMException) {
+    return value.message ?? null;
+  }
+  return null;
+}
+
+/**
+ * Benign browser delivery noise with no actionable stack: ResizeObserver
+ * undelivered-notification warnings, and contentless cross-origin
+ * "Script error." reports. Both lack stacks, so PostHog fuses them into one
+ * noisy issue across unrelated routes. Drop them at every capture entry
+ * point; real failures always carry an error object or a stack.
+ *
+ * ResizeObserver warnings are never real app throws, so they are dropped
+ * whether they arrive as a bare message or attached to an error object.
+ * "Script error." is only dropped when contentless (a bare string with no
+ * error object); a real Error with a stack is still captured.
+ */
+function isResizeObserverWarning(value: unknown): boolean {
+  const message = warningMessageOf(value);
+  return !!message && resizeObserverDeliveryWarnings.has(message.trim());
+}
+
+function isContentlessScriptError(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  return contentlessScriptErrors.has(value.trim().toLowerCase());
+}
+
+function isBenignBrowserWarning(value: unknown): boolean {
+  if (isResizeObserverWarning(value)) return true;
+  return isContentlessScriptError(value);
+}
+const telemetryPreferenceVersion = "v1";
+const telemetryPreferenceMaxAgeSeconds = 365 * 24 * 60 * 60;
+
+const browserPreferenceStore: TelemetryPreferenceStore = {
+  read: readBrowserTelemetryPreference,
+  write: writeBrowserTelemetryPreference,
+  privacySignalEnabled: browserPrivacySignalEnabled,
+  clearSDKState: clearBrowserSDKState,
+  reload: () => window.location.reload(),
+};
+
+export class BrowserTelemetry {
+  private loadedSDK: BrowserSDK | null;
+  private loadingSDK: Promise<void> | null = null;
+  private sdkLoadAttempts = 0;
+  private sdkRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private configured = false;
+  private configResolved = false;
+  private disabled = false;
+  private config: BrowserTelemetryConfig | null = null;
+  private preference: TelemetryPreferenceStatus = "unavailable";
+  private preferenceListeners = new Set<(preference: TelemetryPreferenceStatus) => void>();
+  private activeUserID: string | null = null;
+  private pendingUserID: string | null = null;
+  private pendingInstanceAdmin = false;
+  private pendingEvents: PendingEvent[] = [];
+  private pendingPageViews: PendingPageView[] = [];
+  private pendingExceptions: PendingException[] = [];
+  private capturedErrors = new WeakSet<object>();
+  private currentPagePath: string | null = null;
+  private requestedPagePath: string | null = null;
+  private previousPagePath: string | null = null;
+  private routeTemplates = new Map<string, string>();
+
+  constructor(
+    private readonly sdkSource: BrowserSDK | (() => Promise<BrowserSDK>),
+    private readonly runtimeAvailable: () => boolean = () => typeof window !== "undefined",
+    private readonly preferenceStore: TelemetryPreferenceStore = browserPreferenceStore,
+  ) {
+    this.loadedSDK = typeof sdkSource === "function" ? null : sdkSource;
+  }
+
+  private get sdk(): BrowserSDK {
+    if (!this.loadedSDK) throw new Error("Telemetry SDK is not loaded");
+    return this.loadedSDK;
+  }
+
+  private loadSDK(): void {
+    if (this.loadingSDK || typeof this.sdkSource !== "function" || this.sdkLoadAttempts >= 4)
+      return;
+    this.sdkLoadAttempts++;
+    this.loadingSDK = this.sdkSource()
+      .then((sdk) => {
+        this.loadedSDK = sdk;
+        if (this.config) this.configure(this.config);
+      })
+      .catch(() => {
+        // Only consented activity remains buffered. A temporary failed download
+        // must not discard the intent events that make conversion measurable.
+        if (
+          this.sdkLoadAttempts < 4 &&
+          !this.disabled &&
+          (this.preference === "persistent" || this.preference === "cookieless")
+        ) {
+          this.sdkRetryTimer = setTimeout(
+            () => {
+              this.sdkRetryTimer = null;
+              this.loadSDK();
+            },
+            1000 * this.sdkLoadAttempts ** 2,
+          );
+        }
+      })
+      .finally(() => {
+        this.loadingSDK = null;
+      });
+  }
+
+  private cancelSDKRetry(): void {
+    if (this.sdkRetryTimer !== null) clearTimeout(this.sdkRetryTimer);
+    this.sdkRetryTimer = null;
+  }
+
+  private canQueueCapture(): boolean {
+    return (
+      !this.configResolved ||
+      Boolean(
+        (this.loadingSDK || this.sdkRetryTimer !== null) &&
+        (this.preference === "persistent" || this.preference === "cookieless"),
+      )
+    );
+  }
+
+  configure(config: BrowserTelemetryConfig): void {
+    if (!this.runtimeAvailable()) return;
+    this.cancelSDKRetry();
+    if (!this.loadingSDK) this.sdkLoadAttempts = 0;
+    this.configResolved = true;
+    this.config = config;
+    if (!config.enabled || !config.projectToken?.trim() || !config.apiHost?.trim()) {
+      this.disabled = true;
+      this.setPreferenceStatus("unavailable");
+      this.pendingEvents = [];
+      this.pendingPageViews = [];
+      this.pendingExceptions = [];
+      if (this.configured) this.stopSDKCapture();
+      return;
+    }
+
+    this.disabled = false;
+    const preference = this.preferenceStore.privacySignalEnabled()
+      ? "off"
+      : (this.preferenceStore.read() ?? "undecided");
+    this.setPreferenceStatus(preference);
+    if (preference === "off") {
+      this.disabled = true;
+      if (this.configured) this.stopSDKCapture();
+      this.preferenceStore.clearSDKState(config.projectToken.trim());
+      this.clearPendingCapture();
+      return;
+    }
+    if (preference === "undecided") {
+      this.disabled = true;
+      if (this.configured) this.stopSDKCapture();
+      this.clearPendingCapture();
+      return;
+    }
+
+    if (preference === "cookieless") {
+      this.preferenceStore.clearSDKState(config.projectToken.trim());
+    }
+
+    this.initialize(config, preference);
+  }
+
+  private initialize(config: BrowserTelemetryConfig, preference: TelemetryPreference): void {
+    if (preference === "off") return;
+    if (!this.loadedSDK) {
+      this.loadSDK();
+      return;
+    }
+
+    this.sdk.init(config.projectToken!.trim(), {
+      api_host: config.apiHost!.trim().replace(/\/+$/, ""),
+      ...(config.uiHost?.trim() ? { ui_host: config.uiHost.trim().replace(/\/+$/, "") } : {}),
+      autocapture: false,
+      capture_pageview: false,
+      capture_pageleave: true,
+      capture_heatmaps: false,
+      capture_dead_clicks: false,
+      capture_performance: {
+        network_timing: false,
+        web_vitals: true,
+        web_vitals_allowed_metrics: ["CLS", "FCP", "INP", "LCP"],
+        web_vitals_attribution: false,
+      },
+      before_send: (event: BrowserCaptureEvent | null) => this.sanitizeBrowserEvent(event),
+      capture_exceptions: false,
+      disable_session_recording: true,
+      disable_surveys: true,
+      enable_recording_console_log: false,
+      logs: { captureConsoleLogs: false },
+      disable_capture_url_hashes: true,
+      opt_out_useragent_filter: false,
+      cross_subdomain_cookie: preference === "persistent",
+      cookieWinsOnConflict: preference === "persistent",
+      persistence: preference === "persistent" ? "localStorage+cookie" : "memory",
+      ...(preference === "cookieless" ? { cookieless_mode: "always" } : {}),
+      // The recursive sanitizeSDKProperties() pass below is the primary
+      // removal layer for advertising/click identifiers. This SDK-level
+      // denylist is defense in depth for properties the sanitizer cannot
+      // reshape (for example SDK-registered super-properties applied
+      // after before_send).
+      property_denylist: clickIdentifierDenylist,
+      person_profiles:
+        preference === "persistent" && config.surface === "app" ? "identified_only" : "never",
+      respect_dnt: true,
+    });
+    this.sdk.register(
+      compactProperties({
+        surface: config.surface,
+        environment: config.environment,
+        edition: config.edition,
+        version: config.version,
+        revision: config.revision,
+        analytics_mode: preference,
+      }),
+    );
+    this.configured = true;
+    this.disabled = false;
+
+    if (preference === "persistent" && this.pendingUserID) {
+      this.identify(this.pendingUserID, {
+        isInstanceAdmin: this.pendingInstanceAdmin,
+      });
+    }
+    for (const event of this.pendingEvents.splice(0)) {
+      try {
+        this.sdk.capture(event.name, event.properties);
+      } catch {
+        /* Optional telemetry cannot change product outcomes. */
+      }
+    }
+    const pendingPageViews = this.pendingPageViews.splice(0);
+    for (const pageView of pendingPageViews) {
+      this.capturePageView(pageView.pathname);
+    }
+    for (const exception of this.pendingExceptions.splice(0)) {
+      try {
+        this.sdk.captureException(exception.error, {
+          ...this.deploymentProperties(),
+          ...exception.properties,
+        });
+      } catch {
+        /* Optional telemetry. */
+      }
+    }
+    if (this.requestedPagePath && pendingPageViews.length === 0) {
+      this.capturePageView(this.requestedPagePath);
+    }
+  }
+
+  capture<Name extends TelemetryEventName>(
+    name: Name,
+    ...args: TelemetryEventMap[Name] extends Record<string, never>
+      ? [properties?: TelemetryEventMap[Name]]
+      : [properties: TelemetryEventMap[Name]]
+  ): void {
+    if (this.disabled) return;
+    const properties = allowlistedEventProperties(name, (args[0] ?? {}) as Record<string, unknown>);
+    if (properties === null) return;
+    if (!this.configured) {
+      if (this.canQueueCapture() && this.pendingEvents.length < maxPendingEvents)
+        this.pendingEvents.push({ name, properties });
+      return;
+    }
+    try {
+      this.sdk.capture(name, properties);
+    } catch {
+      /* Optional telemetry cannot change product outcomes. */
+    }
+  }
+
+  capturePageView(pathname: string, _title?: string): void {
+    if (typeof window === "undefined") return;
+    const path = cleanPath(pathname);
+    this.requestedPagePath = pathname;
+    this.rememberRouteTemplate(cleanPath(window.location.pathname), path);
+    if (this.disabled) return;
+    if (!this.configured) {
+      if (this.canQueueCapture() && this.pendingPageViews.length < maxPendingEvents) {
+        this.pendingPageViews.push({ pathname });
+      }
+      return;
+    }
+    this.previousPagePath = this.currentPagePath;
+    this.currentPagePath = path;
+    try {
+      this.sdk.capture("$pageview", {
+        $current_url: `${window.location.origin}${path}`,
+        path,
+      });
+    } catch {
+      /* Optional page tracking. */
+    }
+  }
+
+  private sanitizeBrowserEvent(event: BrowserCaptureEvent | null): BrowserCaptureEvent | null {
+    if (this.disabled || (this.preference !== "persistent" && this.preference !== "cookieless"))
+      return null;
+    if (!event?.properties) return event;
+    const fallbackPath = this.currentPagePath ?? "/unknown";
+    const currentPath = routeTemplateForEvent(event.properties, this.routeTemplates, fallbackPath);
+    const previousPath = event.event === "$pageview" ? this.previousPagePath : this.currentPagePath;
+    return {
+      ...event,
+      properties: {
+        ...sanitizeSDKProperties(event.properties, currentPath, previousPath, this.routeTemplates),
+        client: "web",
+        audience: this.pendingUserID ? "authenticated" : "anonymous",
+        $internal_or_test_user: this.config?.edition === "cloud" && this.pendingInstanceAdmin,
+      },
+    };
+  }
+
+  private rememberRouteTemplate(rawPath: string, routeTemplate: string): void {
+    this.routeTemplates.delete(rawPath);
+    this.routeTemplates.set(rawPath, routeTemplate);
+    this.routeTemplates.set(routeTemplate, routeTemplate);
+    while (this.routeTemplates.size > maxRememberedRouteTemplates) {
+      const oldest = this.routeTemplates.keys().next().value;
+      if (typeof oldest !== "string") break;
+      this.routeTemplates.delete(oldest);
+    }
+  }
+
+  identify(userID: string, options: { isInstanceAdmin?: boolean } = {}): void {
+    const normalized = userID.trim();
+    if (!normalized || containsSensitiveValue(normalized)) {
+      this.resetIdentity();
+      return;
+    }
+    if (this.pendingUserID !== null && this.pendingUserID !== normalized)
+      this.clearPendingCapture();
+    const adminChanged = this.pendingInstanceAdmin !== Boolean(options.isInstanceAdmin);
+    this.pendingInstanceAdmin = Boolean(options.isInstanceAdmin);
+    this.pendingUserID = normalized;
+    if (
+      !this.configured ||
+      this.disabled ||
+      this.preference !== "persistent" ||
+      (this.activeUserID === normalized && !adminChanged)
+    )
+      return;
+    try {
+      if (this.activeUserID !== null) this.sdk.reset();
+      this.sdk.identify(normalized, {
+        $internal_or_test_user: this.config?.edition === "cloud" && this.pendingInstanceAdmin,
+      });
+      this.activeUserID = normalized;
+    } catch {
+      this.disabled = true;
+      this.clearPendingCapture();
+      this.stopSDKCapture();
+      return;
+    }
+    // sdk.reset() clears super-properties; the deployment context below is
+    // safe to re-register because it never contains user identity.
+    this.restoreDeploymentProperties();
+  }
+
+  resetIdentity(): void {
+    this.clearPendingCapture();
+    this.pendingUserID = null;
+    this.pendingInstanceAdmin = false;
+    this.activeUserID = null;
+    if (this.configured) {
+      try {
+        this.sdk.reset();
+      } catch {
+        this.disabled = true;
+        this.stopSDKCapture();
+      }
+    }
+    this.restoreDeploymentProperties();
+  }
+
+  private deploymentProperties(): Record<string, unknown> {
+    return compactProperties({
+      surface: this.config?.surface,
+      environment: this.config?.environment,
+      edition: this.config?.edition,
+      version: this.config?.version,
+      revision: this.config?.revision,
+      analytics_mode:
+        this.preference === "persistent" || this.preference === "cookieless"
+          ? this.preference
+          : undefined,
+    });
+  }
+
+  private restoreDeploymentProperties(): void {
+    if (!this.configured) return;
+    try {
+      this.sdk.register(this.deploymentProperties());
+    } catch {
+      // Identity flows must survive SDK registration failures.
+    }
+  }
+
+  captureException(error: unknown, properties: Record<string, unknown> = {}): void {
+    if (this.disabled) return;
+    if (typeof error === "object" && error !== null) {
+      if (this.capturedErrors.has(error)) return;
+      this.capturedErrors.add(error);
+    }
+    const sanitized = sanitizeError(error);
+    const compacted = {
+      ...this.deploymentProperties(),
+      ...compactProperties(properties),
+    };
+    if (!this.configured) {
+      if (this.canQueueCapture() && this.pendingExceptions.length < maxPendingEvents) {
+        this.pendingExceptions.push({
+          error: sanitized,
+          properties: compacted,
+        });
+      }
+      return;
+    }
+    try {
+      this.sdk.captureException(sanitized, compacted);
+    } catch {
+      /* Never capture a telemetry failure through itself. */
+    }
+  }
+
+  requestHeaders(): Record<string, string> {
+    if (!this.configured || this.disabled || this.preference !== "persistent") return {};
+    try {
+      const distinctID = this.sdk.get_distinct_id?.();
+      const sessionID = this.sdk.get_session_id?.();
+      return compactProperties({
+        "X-PostHog-Distinct-ID": distinctID,
+        "X-PostHog-Session-ID": sessionID,
+      }) as Record<string, string>;
+    } catch {
+      return {};
+    }
+  }
+
+  private stopSDKCapture(): void {
+    try {
+      this.sdk.opt_out_capturing();
+    } catch {
+      // The before_send guard also prevents capture after local disablement.
+    }
+  }
+
+  preferenceStatus(): TelemetryPreferenceStatus {
+    return this.preference;
+  }
+
+  setPreference(preference: TelemetryPreference): void {
+    if (!this.runtimeAvailable() || this.preference === "unavailable") return;
+    const nextPreference = this.preferenceStore.privacySignalEnabled() ? "off" : preference;
+    this.preferenceStore.write(nextPreference);
+    if (nextPreference === this.preference) return;
+
+    if (this.configured) {
+      this.disabled = true;
+      // opt_out_capturing() discards already-buffered SDK requests; reset()
+      // alone only clears identity and would leave queued batches to flush.
+      this.clearPendingCapture();
+      this.stopSDKCapture();
+      try {
+        this.sdk.reset();
+      } catch {
+        /* Consent revocation must complete even if SDK storage fails. */
+      }
+      if (this.config?.projectToken) {
+        this.preferenceStore.clearSDKState(this.config.projectToken.trim());
+      }
+      this.setPreferenceStatus(nextPreference);
+      this.preferenceStore.reload();
+      return;
+    }
+
+    this.setPreferenceStatus(nextPreference);
+    if (nextPreference === "off") {
+      this.cancelSDKRetry();
+      this.clearPendingCapture();
+      if (this.config?.projectToken) {
+        this.preferenceStore.clearSDKState(this.config.projectToken.trim());
+      }
+      return;
+    }
+    if (this.config) {
+      this.disabled = false;
+      this.initialize(this.config, nextPreference);
+    }
+  }
+
+  subscribePreference(listener: (preference: TelemetryPreferenceStatus) => void): () => void {
+    this.preferenceListeners.add(listener);
+    listener(this.preference);
+    return () => this.preferenceListeners.delete(listener);
+  }
+
+  private setPreferenceStatus(preference: TelemetryPreferenceStatus): void {
+    this.preference = preference;
+    for (const listener of this.preferenceListeners) listener(preference);
+  }
+
+  private clearPendingCapture(): void {
+    this.pendingEvents = [];
+    this.pendingPageViews = [];
+    this.pendingExceptions = [];
+  }
+}
+
+const telemetry = new BrowserTelemetry(async () => {
+  const { default: posthog } = await import("posthog-js");
+  return posthog as unknown as BrowserSDK;
+});
+
+export function configureTelemetry(config: BrowserTelemetryConfig): void {
+  telemetry.configure(config);
+}
+
+export function captureTelemetryEvent<Name extends TelemetryEventName>(
+  name: Name,
+  ...args: TelemetryEventMap[Name] extends Record<string, never>
+    ? [properties?: TelemetryEventMap[Name]]
+    : [properties: TelemetryEventMap[Name]]
+): void {
+  telemetry.capture(name, ...(args as never));
+}
+
+export function captureTelemetryPageView(pathname: string, title?: string): void {
+  telemetry.capturePageView(pathname, title);
+}
+
+export function identifyTelemetryUser(
+  userID: string,
+  options: { isInstanceAdmin?: boolean } = {},
+): void {
+  telemetry.identify(userID, options);
+}
+
+export function resetTelemetryIdentity(): void {
+  telemetry.resetIdentity();
+}
+
+export function getTelemetryPreference(): TelemetryPreferenceStatus {
+  return telemetry.preferenceStatus();
+}
+
+export function setTelemetryPreference(preference: TelemetryPreference): void {
+  telemetry.setPreference(preference);
+}
+
+export function subscribeTelemetryPreference(
+  listener: (preference: TelemetryPreferenceStatus) => void,
+): () => void {
+  return telemetry.subscribePreference(listener);
+}
+
+export function openTelemetryPreferences(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(telemetryPreferencesEvent));
+}
+
+export function captureClientException(
+  error: unknown,
+  properties: Record<string, unknown> = {},
+): void {
+  telemetry.captureException(error, properties);
+}
+
+export function telemetryRequestHeaders(): Record<string, string> {
+  return telemetry.requestHeaders();
+}
+
+export function telemetryDistinctID(): string {
+  return telemetry.requestHeaders()["X-PostHog-Distinct-ID"] ?? "";
+}
+
+export function applyTelemetryRequestHeaders(
+  headers: Headers,
+  requestHeaders: Record<string, string> = telemetryRequestHeaders(),
+): Headers {
+  for (const [name, value] of Object.entries(requestHeaders)) {
+    headers.set(name, value);
+  }
+  return headers;
+}
+
+function chunkFailureDiagnostics(error: unknown): Record<string, string> {
+  if (!isChunkLoadError(error)) return {};
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  const asset = extractFirstPartyAssetPath(message);
+  return asset ? { chunk_asset: asset } : {};
+}
+
+function formatConsoleErrorArg(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean" || value == null) {
+    return String(value);
+  }
+  if (value instanceof Error) return `${value.name}: ${value.message}`;
+  try {
+    const serialized = JSON.stringify(value);
+    return typeof serialized === "string" ? serialized : "[unserializable]";
+  } catch {
+    return "[unserializable]";
+  }
+}
+
+/**
+ * Bridge console.error into exception telemetry so failures that are logged
+ * but never thrown (failed loads, failed saves, guard failures) still reach
+ * PostHog. The original console behavior is preserved, and a reentrancy guard
+ * keeps telemetry's own logging from looping back in.
+ */
+export function installConsoleErrorBridge(
+  capture: (error: unknown, properties: Record<string, unknown>) => void = captureClientException,
+  target: Pick<Console, "error"> = console,
+): () => void {
+  const original = target.error;
+  if (typeof original !== "function") return () => undefined;
+  let capturing = false;
+  const bridged = (...args: unknown[]) => {
+    original.apply(target, args);
+    if (capturing || args.length === 0) return;
+    const [first, ...rest] = args;
+    const originalError = args.find(
+      (value) =>
+        value instanceof Error ||
+        (typeof DOMException !== "undefined" && value instanceof DOMException),
+    );
+    if (originalError && isResizeObserverWarning(originalError)) return;
+    const error =
+      originalError ??
+      new Error(
+        [formatConsoleErrorArg(first), ...rest.map(formatConsoleErrorArg)].join(" ").trim() ||
+          "Console error",
+      );
+    if (!originalError && isBenignBrowserWarning(error.message)) return;
+    capturing = true;
+    try {
+      capture(error, { error_boundary: "console_error" });
+    } finally {
+      capturing = false;
+    }
+  };
+  target.error = bridged as Console["error"];
+  return () => {
+    if (target.error === bridged) target.error = original;
+  };
+}
+
+export function installGlobalErrorCapture(): () => void {
+  if (typeof window === "undefined") return () => undefined;
+  const onError = (event: ErrorEvent) => {
+    if (event.defaultPrevented) return;
+    // Browsers report deferred ResizeObserver notifications without a thrown application error.
+    // Contentless cross-origin "Script error." reports carry no stack either.
+    if (!event.error && isBenignBrowserWarning(event.message)) return;
+    if (event.error && isResizeObserverWarning(event.error)) return;
+    const error = event.error ?? new Error(event.message);
+    captureClientException(error, {
+      error_boundary: "window_error",
+      ...chunkFailureDiagnostics(error),
+    });
+  };
+  const onUnhandledRejection = (event: PromiseRejectionEvent) => {
+    if (event.defaultPrevented) return;
+    if (isResizeObserverWarning(event.reason) || isContentlessScriptError(event.reason)) return;
+    captureClientException(event.reason, {
+      error_boundary: "unhandled_rejection",
+      ...chunkFailureDiagnostics(event.reason),
+    });
+  };
+  window.addEventListener("error", onError);
+  window.addEventListener("unhandledrejection", onUnhandledRejection);
+  const uninstallConsoleBridge = installConsoleErrorBridge();
+  return () => {
+    window.removeEventListener("error", onError);
+    window.removeEventListener("unhandledrejection", onUnhandledRejection);
+    uninstallConsoleBridge();
+  };
+}
+
+function readBrowserTelemetryPreference(): TelemetryPreference | null {
+  if (typeof document === "undefined") return null;
+  const encoded = document.cookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(`${telemetryPreferenceCookie}=`))
+    ?.slice(telemetryPreferenceCookie.length + 1);
+  if (!encoded) return null;
+  const value = decodeURIComponent(encoded);
+  const [version, preference, ...extra] = value.split(":");
+  if (
+    version !== telemetryPreferenceVersion ||
+    extra.length > 0 ||
+    !isTelemetryPreference(preference)
+  ) {
+    return null;
+  }
+  return preference;
+}
+
+function writeBrowserTelemetryPreference(preference: TelemetryPreference): void {
+  const attributes = [
+    `${telemetryPreferenceCookie}=${encodeURIComponent(`${telemetryPreferenceVersion}:${preference}`)}`,
+    "Path=/",
+    `Max-Age=${telemetryPreferenceMaxAgeSeconds}`,
+    "SameSite=Lax",
+  ];
+  if (window.location.protocol === "https:") attributes.push("Secure");
+  if (isOpenPostHostedHostname(window.location.hostname)) attributes.push("Domain=.openpo.st");
+  document.cookie = attributes.join("; ");
+}
+
+function browserPrivacySignalEnabled(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const privacyNavigator = navigator as Navigator & {
+    globalPrivacyControl?: boolean;
+    msDoNotTrack?: string;
+  };
+  return (
+    privacyNavigator.globalPrivacyControl === true ||
+    [privacyNavigator.doNotTrack, privacyNavigator.msDoNotTrack].some((value) => value === "1")
+  );
+}
+
+function clearBrowserSDKState(projectToken: string): void {
+  if (!projectToken) return;
+  const keys = [`ph_${projectToken}_posthog`, `__ph_opt_in_out_${projectToken}`];
+  try {
+    for (const key of keys) {
+      window.localStorage.removeItem(key);
+      window.sessionStorage.removeItem(key);
+    }
+  } catch {
+    // Storage can be unavailable under strict browser policies. Cookie cleanup still applies.
+  }
+  for (const key of keys) {
+    const cookieAttributes = [
+      `${key}=`,
+      "Path=/",
+      "Max-Age=0",
+      "SameSite=Lax",
+      ...(window.location.protocol === "https:" ? ["Secure"] : []),
+    ];
+    document.cookie = cookieAttributes.join("; ");
+    if (isOpenPostHostedHostname(window.location.hostname)) {
+      document.cookie = [...cookieAttributes, "Domain=.openpo.st"].join("; ");
+    }
+  }
+}
+
+function isTelemetryPreference(value: string | undefined): value is TelemetryPreference {
+  return value === "persistent" || value === "cookieless" || value === "off";
+}
+
+function isOpenPostHostedHostname(hostname: string): boolean {
+  return hostname === "openpo.st" || hostname.endsWith(".openpo.st");
+}
+
+function compactProperties(properties: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(properties)
+      .filter(([, value]) => value !== undefined)
+      .map(([key, value]) => [key, sanitizePropertyValue(value)]),
+  );
+}
+
+function cleanPath(pathname: string): string {
+  try {
+    return new URL(pathname, "https://openpost.invalid").pathname;
+  } catch {
+    return "/";
+  }
+}
+
+function sanitizeSDKProperties(
+  properties: Record<string, unknown>,
+  currentPath: string,
+  previousPath: string | null,
+  routeTemplates: ReadonlyMap<string, string>,
+): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(properties)) {
+    if (key === "title" || key === "$title" || key === "entries") continue;
+    // Advertising/click identifiers emitted by the SDK (or arriving as
+    // initial-property variants) are never product data. Drop them at
+    // every nesting level: $set/$set_once containers, arrays, and nested
+    // event-property objects all traverse this same sanitizer.
+    if (clickIdentifierDenylist.includes(key)) continue;
+    if (
+      key === "$current_url" ||
+      key === "$initial_current_url" ||
+      key === "$session_entry_url" ||
+      key === "navigationURL"
+    ) {
+      sanitized[key] = safeCurrentURL(value, currentPath, routeTemplates);
+      continue;
+    }
+    if (key === "$pathname") {
+      sanitized[key] = currentPath;
+      continue;
+    }
+    if (key === "$initial_pathname" || key === "$session_entry_pathname") {
+      sanitized[key] = routeTemplateForPath(value, routeTemplates, currentPath);
+      continue;
+    }
+    if (key === "$prev_pageview_pathname") {
+      sanitized[key] = routeTemplateForPath(value, routeTemplates, previousPath ?? currentPath);
+      continue;
+    }
+    if (key === "$referrer" || key === "$initial_referrer" || key === "$session_entry_referrer") {
+      sanitized[key] = safeReferrerOrigin(value);
+      continue;
+    }
+    // PostHog parses Error.stack before this hook. Retain the same public asset
+    // locations here so source-map resolution survives the second privacy pass.
+    if (key === "filename" && typeof value === "string" && looksLikeURL(value)) {
+      sanitized[key] = scrubStackURL(value);
+      continue;
+    }
+    if (key === "url" && typeof value === "string") continue;
+    if (key === "name" && typeof value === "string" && looksLikeURL(value)) continue;
+    if (Array.isArray(value)) {
+      sanitized[key] = value.map((entry) =>
+        entry && typeof entry === "object"
+          ? sanitizeSDKProperties(
+              entry as Record<string, unknown>,
+              currentPath,
+              previousPath,
+              routeTemplates,
+            )
+          : typeof entry === "string" && looksLikeURL(entry)
+            ? "[redacted-url]"
+            : entry,
+      );
+      continue;
+    }
+    if (value && typeof value === "object") {
+      sanitized[key] = sanitizeSDKProperties(
+        value as Record<string, unknown>,
+        currentPath,
+        previousPath,
+        routeTemplates,
+      );
+      continue;
+    }
+    sanitized[key] = typeof value === "string" && looksLikeURL(value) ? "[redacted-url]" : value;
+  }
+  return sanitized;
+}
+
+/**
+ * Advertising/click identifiers the installed posthog-js SDK attaches to
+ * events (campaign properties plus first-touch variants). Protocol and
+ * application identifiers (distinct IDs, session/window IDs, workspace or
+ * job IDs) are intentionally absent: they have separate privacy policies.
+ */
+const clickIdentifierDenylist = [
+  "fbclid",
+  "gclid",
+  "gclsrc",
+  "dclid",
+  "gbraid",
+  "wbraid",
+  "msclkid",
+  "ttclid",
+  "twclid",
+  "li_fat_id",
+  "igshid",
+  "mc_cid",
+  "rdt_cid",
+  "epik",
+  "qclid",
+  "sccid",
+  "irclid",
+  "_kx",
+  "$initial_fbclid",
+  "$initial_gclid",
+  "$initial_gclsrc",
+  "$initial_dclid",
+  "$initial_gbraid",
+  "$initial_wbraid",
+  "$initial_msclkid",
+  "$initial_ttclid",
+  "$initial_twclid",
+  "$initial_li_fat_id",
+  "$initial_igshid",
+  "$initial_mc_cid",
+  "$initial_rdt_cid",
+  "$initial_kx",
+  "$initial_epik",
+  "$initial_qclid",
+  "$initial_sccid",
+  "$initial_irclid",
+];
+
+function looksLikeURL(value: string): boolean {
+  return /^(?:https?:)?\/\//iu.test(value.trim());
+}
+
+function routeTemplateForEvent(
+  properties: Record<string, unknown>,
+  routeTemplates: ReadonlyMap<string, string>,
+  fallbackPath: string,
+): string {
+  for (const value of [properties.$current_url, properties.$pathname]) {
+    const routeTemplate = routeTemplateForPath(value, routeTemplates);
+    if (routeTemplate) return routeTemplate;
+  }
+  return fallbackPath;
+}
+
+function routeTemplateForPath(
+  value: unknown,
+  routeTemplates: ReadonlyMap<string, string>,
+  fallbackPath?: string,
+): string {
+  if (typeof value !== "string") return fallbackPath ?? "";
+  const path = cleanPath(value);
+  return routeTemplates.get(path) ?? fallbackPath ?? "";
+}
+
+function safeCurrentURL(
+  value: unknown,
+  fallbackPath: string,
+  routeTemplates: ReadonlyMap<string, string>,
+): string {
+  if (typeof value === "string") {
+    try {
+      const url = new URL(value, window.location.origin);
+      const pathname = routeTemplates.get(url.pathname) ?? fallbackPath;
+      return `${url.origin}${pathname}`;
+    } catch {
+      // Fall through to the current browser origin.
+    }
+  }
+  return `${window.location.origin}${fallbackPath}`;
+}
+
+function safeReferrerOrigin(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0) return "";
+  try {
+    return new URL(value).origin;
+  } catch {
+    return "[redacted-url]";
+  }
+}
+
+function sanitizeError(value: unknown): Error {
+  const source =
+    value instanceof Error
+      ? value
+      : typeof Event !== "undefined" && value instanceof Event
+        ? new Error(`${value.constructor.name || "Event"}: ${value.type || "unknown"}`)
+        : (errorFromObject(value) ??
+          new Error(typeof value === "string" ? value : "Unknown client error"));
+  // Production Svelte errors contain only a documentation URL. Preserve the
+  // public error code before URL redaction, without retaining query values.
+  const message = (source.message || "Unknown client error").replace(
+    /https:\/\/svelte\.dev\/e\/([a-z_]+)(?:[?#][^\s]*)?(?=\s|$)/g,
+    "Svelte error: $1",
+  );
+  const result = new Error(scrubPropertyString(message));
+  result.name = source.name || "Error";
+  if (source.stack) result.stack = scrubStack(source.stack);
+  return result;
+}
+
+function errorFromObject(value: unknown): Error | null {
+  if (typeof value !== "object" || value === null) return null;
+  try {
+    const message = Object.getOwnPropertyDescriptor(value, "message")?.value;
+    if (typeof message !== "string" || !message) return null;
+    const error = new Error(message);
+    const name = Object.getOwnPropertyDescriptor(value, "name")?.value;
+    if (typeof name === "string" && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(name)) {
+      error.name = name;
+    }
+    const stack = Object.getOwnPropertyDescriptor(value, "stack")?.value;
+    if (typeof stack === "string") error.stack = stack;
+    return error;
+  } catch {
+    return null;
+  }
+}
+
+function sanitizePropertyValue(value: unknown): unknown {
+  if (typeof value === "string") return scrubPropertyString(value);
+  if (Array.isArray(value)) return value.map(sanitizePropertyValue);
+  if (value && typeof value === "object") {
+    return compactProperties(value as Record<string, unknown>);
+  }
+  return value;
+}
+
+function scrubPropertyString(value: string): string {
+  return truncate(
+    scrubSensitiveText(value).replace(/https?:\/\/[^\s)\]}]+/gi, "[redacted-url]"),
+    200,
+  );
+}
+
+function scrubStack(value: string): string {
+  return scrubSensitiveText(value.replace(/https?:\/\/[^\s)\]}]+/gi, scrubStackURL));
+}
+
+function scrubStackURL(value: string): string {
+  const withoutQueryOrFragment = value.replace(/[?#].*$/, "");
+  try {
+    const url = new URL(withoutQueryOrFragment);
+    if (typeof window === "undefined" || url.origin !== window.location.origin) {
+      return "[redacted-url]";
+    }
+    const pathname = url.pathname;
+    if (
+      // SvelteKit and the public static bundles keep compiled JavaScript
+      // under /_app/immutable or /assets; the docs static export keeps it
+      // under /_next/static or /docs/_next/static for its /docs base path.
+      /^\/(?:_app\/immutable|assets|(?:docs\/)?_next\/static)\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]+\.m?js(?::\d+){0,2}$/.test(
+        pathname,
+      )
+    ) {
+      return `${url.origin}${pathname}`;
+    }
+  } catch {
+    // Invalid absolute URLs are redacted below.
+  }
+  return "[redacted-url]";
+}
+
+function scrubSensitiveText(value: string): string {
+  return value
+    .replace(/([?&](?:token|code|secret|key|signature|state)=)[^&\s)]+/gi, "$1[redacted]")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [redacted]")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[redacted-email]");
+}
+
+function truncate(value: string, maxLength: number): string {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength - 1)}…`;
+}

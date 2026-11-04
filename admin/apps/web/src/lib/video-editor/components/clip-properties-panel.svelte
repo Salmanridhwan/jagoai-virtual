@@ -1,0 +1,512 @@
+<!-- Type-specific, undoable clip inspector with FreeCut-compatible auto-key rules. -->
+<script lang="ts">
+	import { sequenceStore } from '../sequences/sequence-store.svelte';
+	import { m } from '$lib/paraglide/messages';
+	import { Button } from '$lib/components/ui/button';
+	import { Input } from '$lib/components/ui/input';
+	import AppSelect, { type AppSelectOption } from '$lib/components/app-select.svelte';
+	import ColorPicker from '$lib/components/color-picker.svelte';
+	import { Disclosure as EditorDisclosure, HintButton } from '$lib/components/editor-density';
+	import { timelineStore } from '$lib/video-editor/timeline/stores/timeline-store.svelte';
+	import { autoKeyframeStore } from '$lib/video-editor/timeline/stores/auto-keyframe-store.svelte';
+	import { setAnimatedProperty } from '$lib/video-editor/timeline/actions/keyframes';
+	import { updateItemProperties } from '$lib/video-editor/timeline/actions/items';
+	import type { KeyframeProperty, TimelineItem } from '$lib/video-editor/project/types';
+	import ShapePropertiesPanel from './shape-properties-panel.svelte';
+	import BackgroundPropertiesPanel from './background-properties-panel.svelte';
+	import CornerPinPropertiesPanel from './corner-pin-properties-panel.svelte';
+	import LottiePropertiesPanel from './lottie-properties-panel.svelte';
+	import TextPropertiesPanel from './text-properties-panel.svelte';
+	import SubtitlePropertiesPanel from './subtitle-properties-panel.svelte';
+	import CompositionControlOverrides from './composition-control-overrides.svelte';
+	import { resolveAnimatedItemLocalAt } from '$lib/video-editor/timeline/animated-properties';
+	import { findLinkedAudioCompanion } from '$lib/video-editor/audio/transition-crossfade';
+	import AudioDuckingPanel from './audio-ducking-panel.svelte';
+	import AudioEffectsPanel from './audio-effects-panel.svelte';
+	import {
+		clampNoiseReductionAmount,
+		resolveNoiseReductionSettings
+	} from '$lib/video-editor/audio/audio-noise-reduction';
+	import AudioEqPanel from './audio-eq-panel.svelte';
+	import { Checkbox } from '$lib/components/ui/checkbox';
+	import { Slider } from '$lib/components/ui/slider';
+	import { Label } from '$lib/components/ui/label';
+	import ClipTransformSection from './clip-transform-section.svelte';
+	import ClipCropSection from './clip-crop-section.svelte';
+	import ClipPlaybackSection from './clip-playback-section.svelte';
+	import ClipAudioCoreSection from './clip-audio-core-section.svelte';
+	import AnimatedImagePlaybackSection from './animated-image-playback-section.svelte';
+
+	let nrDraftAmount = $state<number | null>(null);
+	// Reset draft when selection or persisted amount changes
+	$effect(() => {
+		void audioItem?.audioNoiseReductionAmount;
+		void audioItem?.audioNoiseReductionEnabled;
+		nrDraftAmount = null;
+	});
+
+	let {
+		itemId,
+		itemIds = [],
+		onedit,
+		oncreatevoice,
+		onbrowsetextstyles
+	}: {
+		itemId: string | null;
+		itemIds?: string[];
+		onedit: () => void;
+		oncreatevoice?: (itemId: string, text: string) => void;
+		onbrowsetextstyles?: () => void;
+	} = $props();
+	const item = $derived(itemId ? timelineStore.itemById.get(itemId) : undefined);
+
+	const audioItems = $derived.by(() => {
+		const selectedIds = itemIds.length > 0 ? itemIds : itemId ? [itemId] : [];
+		const selected = [...new Set(selectedIds)]
+			.map((id) => timelineStore.itemById.get(id))
+			.filter((candidate): candidate is TimelineItem => candidate !== undefined);
+		const resolved = new Map<string, TimelineItem>();
+		for (const candidate of selected) {
+			if (candidate.type === 'audio') {
+				resolved.set(candidate.id, candidate);
+				continue;
+			}
+			if (candidate.type !== 'video') continue;
+			const companion = findLinkedAudioCompanion(candidate, timelineStore.items);
+			if (candidate.audioDetached && !companion) continue;
+			resolved.set((companion ?? candidate).id, companion ?? candidate);
+		}
+		return [...resolved.values()];
+	});
+	const audioItem = $derived(audioItems[0]);
+
+	interface NumericField {
+		property: KeyframeProperty;
+		label: string;
+		min: number;
+		max: number;
+		step: number;
+	}
+
+	const textAdvancedFields: NumericField[] = [
+		{
+			property: 'lineHeight',
+			label: m.video_editor_property_line_height(),
+			min: 0.5,
+			max: 4,
+			step: 0.05
+		},
+		{
+			property: 'letterSpacing',
+			label: m.video_editor_property_tracking(),
+			min: -10,
+			max: 50,
+			step: 0.1
+		},
+		{
+			property: 'paddingX',
+			label: m.video_editor_property_padding_x(),
+			min: 0,
+			max: 500,
+			step: 1
+		},
+		{
+			property: 'paddingY',
+			label: m.video_editor_property_padding_y(),
+			min: 0,
+			max: 500,
+			step: 1
+		},
+		{
+			property: 'borderRadius',
+			label: m.video_editor_property_box_radius(),
+			min: 0,
+			max: 500,
+			step: 1
+		},
+		{
+			property: 'strokeWidth',
+			label: m.video_editor_property_stroke(),
+			min: 0,
+			max: 30,
+			step: 0.5
+		},
+		{
+			property: 'textShadowOffsetX',
+			label: m.video_editor_text_shadow_x(),
+			min: -100,
+			max: 100,
+			step: 1
+		},
+		{
+			property: 'textShadowOffsetY',
+			label: m.video_editor_text_shadow_y(),
+			min: -100,
+			max: 100,
+			step: 1
+		},
+		{
+			property: 'textShadowBlur',
+			label: m.video_editor_text_shadow_blur(),
+			min: 0,
+			max: 160,
+			step: 1
+		}
+	];
+	const textAlignmentOptions: AppSelectOption[] = [
+		{ value: 'left', label: m.video_editor_align_left() },
+		{ value: 'center', label: m.video_editor_align_center() },
+		{ value: 'right', label: m.video_editor_align_right() }
+	];
+	const verticalAlignmentOptions: AppSelectOption[] = [
+		{ value: 'top', label: m.video_editor_property_top() },
+		{ value: 'middle', label: m.video_editor_align_center() },
+		{ value: 'bottom', label: m.video_editor_property_bottom() }
+	];
+
+	function valueFor(source: TimelineItem, property: KeyframeProperty): number {
+		const frameWidth = sequenceStore.activeWidth;
+		const frameHeight = sequenceStore.activeHeight;
+		const resolved = resolveAnimatedItemLocalAt(source, timelineStore.currentFrame, {
+			fps: timelineStore.fps,
+			frameWidth,
+			frameHeight,
+			items: timelineStore.items
+		});
+		switch (property) {
+			case 'x':
+				return resolved.transform?.x ?? defaultValue(property);
+			case 'y':
+				return resolved.transform?.y ?? defaultValue(property);
+			case 'width':
+				return resolved.transform?.width ?? source.sourceWidth ?? frameWidth;
+			case 'height':
+				return resolved.transform?.height ?? source.sourceHeight ?? frameHeight;
+			case 'scaleX':
+				return resolved.transform?.scaleX ?? 1;
+			case 'scaleY':
+				return resolved.transform?.scaleY ?? 1;
+			case 'anchorX':
+				return (
+					resolved.transform?.anchorX ??
+					(resolved.transform?.width ?? source.sourceWidth ?? frameWidth) / 2
+				);
+			case 'anchorY':
+				return (
+					resolved.transform?.anchorY ??
+					(resolved.transform?.height ?? source.sourceHeight ?? frameHeight) / 2
+				);
+			case 'rotation':
+				return resolved.transform?.rotation ?? defaultValue(property);
+			case 'opacity':
+				return resolved.transform?.opacity ?? defaultValue(property);
+			case 'cornerRadius':
+				return resolved.transform?.cornerRadius ?? defaultValue(property);
+			case 'cropLeft':
+				return resolved.crop?.left ?? 0;
+			case 'cropRight':
+				return resolved.crop?.right ?? 0;
+			case 'cropTop':
+				return resolved.crop?.top ?? 0;
+			case 'cropBottom':
+				return resolved.crop?.bottom ?? 0;
+			case 'cropSoftness':
+				return resolved.crop?.softness ?? 0;
+			case 'volume':
+				return resolved.volume ?? 1;
+			case 'fontSize':
+				return resolved.fontSize ?? defaultValue(property);
+			case 'fontWeight':
+				return resolved.fontWeight ?? defaultValue(property);
+			case 'lineHeight':
+				return resolved.lineHeight ?? defaultValue(property);
+			case 'letterSpacing':
+				return resolved.letterSpacing ?? 0;
+			case 'paddingX':
+				return resolved.paddingX ?? 0;
+			case 'paddingY':
+				return resolved.paddingY ?? 0;
+			case 'borderRadius':
+				return resolved.borderRadius ?? 0;
+			case 'strokeWidth':
+				return resolved.strokeWidth ?? 0;
+			case 'textShadowOffsetX':
+				return resolved.textShadow?.offsetX ?? 0;
+			case 'textShadowOffsetY':
+				return resolved.textShadow?.offsetY ?? 0;
+			case 'textShadowBlur':
+				return resolved.textShadow?.blur ?? 0;
+		}
+		return defaultValue(property);
+	}
+
+	function defaultValue(property: KeyframeProperty): number {
+		if (property === 'opacity' || property === 'volume') return 1;
+		if (property === 'fontSize') return 48;
+		if (property === 'fontWeight') return 600;
+		if (property === 'lineHeight') return 1.2;
+		return 0;
+	}
+
+	function commitNumeric(property: KeyframeProperty, value: number): void {
+		if (!itemId || !Number.isFinite(value)) return;
+		if (
+			setAnimatedProperty(
+				itemId,
+				property,
+				timelineStore.currentFrame,
+				value,
+				autoKeyframeStore.isEnabled(itemId, property)
+			)
+		)
+			onedit();
+	}
+
+	function commitText(patch: Partial<TimelineItem>): void {
+		if (!itemId) return;
+		if (updateItemProperties(itemId, patch, 'UPDATE_CLIP_PROPERTIES')) onedit();
+	}
+
+	function commitAudioPatch(patch: Partial<TimelineItem>): void {
+		if (!audioItem) return;
+		if (updateItemProperties(audioItem.id, patch, 'UPDATE_CLIP_AUDIO')) onedit();
+	}
+
+	function commitTextShadowColor(color: string): void {
+		const current = itemId ? timelineStore.itemById.get(itemId) : undefined;
+		commitText({
+			textShadow: {
+				blur: current?.textShadow?.blur ?? 0,
+				color,
+				offsetX: current?.textShadow?.offsetX ?? 0,
+				offsetY: current?.textShadow?.offsetY ?? 0
+			}
+		});
+	}
+</script>
+
+{#if item}
+	<div class="flex flex-col gap-3" role="group" aria-label={m.video_editor_clip_properties()}>
+		{#if item.type === 'adjustment'}
+			<p class="text-xs leading-relaxed text-muted-foreground">
+				{m.video_editor_adjustment_layer_hint()}
+			</p>
+		{/if}
+
+		{#if item.type === 'text'}
+			<section aria-label={m.video_editor_tool_text()}>
+				<TextPropertiesPanel {item} {itemIds} {onedit} {oncreatevoice} {onbrowsetextstyles} />
+				<div class="mt-1 grid grid-cols-2 gap-1">
+					<label class="text-[10px] text-muted-foreground">
+						{m.video_editor_text_alignment()}
+						<AppSelect
+							value={item.textAlign ?? 'center'}
+							options={textAlignmentOptions}
+							ariaLabel={m.video_editor_text_alignment()}
+							class="mt-0.5 h-[25px] w-full text-xs"
+							onValueChange={(textAlign) =>
+								commitText({ textAlign: textAlign as TimelineItem['textAlign'] })}
+						/>
+					</label>
+					<label class="text-[10px] text-muted-foreground">
+						{m.video_editor_text_vertical_alignment()}
+						<AppSelect
+							value={item.verticalAlign ?? 'middle'}
+							options={verticalAlignmentOptions}
+							ariaLabel={m.video_editor_text_vertical_alignment()}
+							class="mt-0.5 h-[25px] w-full text-xs"
+							onValueChange={(verticalAlign) =>
+								commitText({ verticalAlign: verticalAlign as TimelineItem['verticalAlign'] })}
+						/>
+					</label>
+				</div>
+				<EditorDisclosure label={m.video_editor_advanced()} class="mt-2">
+					<div class="border-t border-border p-2">
+						<div class="grid grid-cols-2 gap-1">
+							{#each textAdvancedFields as field (field.property)}
+								<label class="text-[10px] text-muted-foreground"
+									>{field.label}<Input
+										class="mt-0.5 w-full rounded bg-field px-1.5 py-1 text-xs text-field-foreground"
+										type="number"
+										min={field.min}
+										max={field.max}
+										step={field.step}
+										value={valueFor(item, field.property)}
+										onchange={(event) =>
+											commitNumeric(field.property, event.currentTarget.valueAsNumber)}
+									/></label
+								>
+							{/each}
+						</div>
+						<div class="mt-1 grid grid-cols-2 gap-1">
+							<ColorPicker
+								label={m.video_editor_text_stroke_color()}
+								value={item.strokeColor ?? '#000000'}
+								live={false}
+								onChange={(value) => commitText({ strokeColor: value })}
+							/>
+							<ColorPicker
+								label={m.video_editor_text_shadow_color()}
+								value={item.textShadow?.color ?? '#000000'}
+								live={false}
+								onChange={commitTextShadowColor}
+							/>
+						</div>
+					</div>
+				</EditorDisclosure>
+			</section>
+		{/if}
+
+		{#if item.type === 'shape'}
+			<ShapePropertiesPanel {item} {onedit} />
+		{/if}
+
+		{#if item.type === 'background'}
+			<BackgroundPropertiesPanel {item} {onedit} />
+		{/if}
+
+		{#if item.type === 'lottie'}
+			<LottiePropertiesPanel {item} {onedit} />
+		{/if}
+
+		{#if item.type === 'subtitle'}
+			<SubtitlePropertiesPanel
+				{item}
+				canvasWidth={sequenceStore.activeWidth}
+				canvasHeight={sequenceStore.activeHeight}
+				{onedit}
+			/>
+		{/if}
+
+		{#if item.type === 'composition'}
+			<CompositionControlOverrides {item} {onedit} />
+		{/if}
+
+		{#if item.type !== 'adjustment' && item.type !== 'audio'}
+			<ClipTransformSection itemId={item.id} {itemIds} {onedit} />
+		{/if}
+
+		<ClipCropSection itemId={item.id} {itemIds} {onedit} />
+
+		{#if item.type === 'image'}
+			<AnimatedImagePlaybackSection itemId={item.id} {itemIds} {onedit} />
+		{/if}
+
+		{#if item.type === 'video' || item.type === 'audio'}
+			<ClipAudioCoreSection {audioItems} {onedit} />
+
+			{#if audioItem}
+				{@const noise = resolveNoiseReductionSettings(audioItem)}
+				<AudioEqPanel items={audioItems} {onedit} />
+				<AudioEffectsPanel item={audioItem} />
+				<AudioDuckingPanel item={audioItem} {onedit} />
+				<EditorDisclosure
+					label={m.video_editor_audio_noise_title()}
+					summary={noise.enabled
+						? m.video_editor_audio_noise_applied({ amount: String(noise.amount) })
+						: m.video_editor_audio_noise_bypassed()}
+					class="mt-2 border-t border-[var(--video-editor-border)]"
+				>
+					{#snippet actions()}
+						<HintButton
+							label={m.video_editor_audio_noise_description()}
+							hint={m.video_editor_audio_noise_description()}
+						/>
+					{/snippet}
+					<div class="p-2" data-testid="noise-reduction-panel">
+						<div class="flex items-center gap-2">
+							<div class="flex items-center gap-2">
+								<Checkbox
+									checked={noise.enabled}
+									aria-label={m.video_editor_audio_noise_enable()}
+									onCheckedChange={(checked) =>
+										commitAudioPatch({
+											audioNoiseReductionEnabled: checked === true,
+											audioNoiseReductionAmount: noise.amount
+										})}
+								/>
+								<Label class="text-[11px] text-foreground"
+									>{m.video_editor_audio_noise_enable()}</Label
+								>
+							</div>
+							<span class="ml-auto text-[10px] text-muted-foreground" aria-live="polite">
+								{noise.enabled
+									? m.video_editor_audio_noise_applied({ amount: String(noise.amount) })
+									: m.video_editor_audio_noise_bypassed()}
+							</span>
+						</div>
+						<div class="mt-2 space-y-1">
+							<Label
+								for={`nr-${audioItem.id}`}
+								class="text-[10px] text-muted-foreground"
+								title={m.video_editor_audio_noise_amount_hint({
+									amount: String(nrDraftAmount ?? noise.amount)
+								})}>{m.video_editor_audio_noise_amount()}</Label
+							>
+							<Slider
+								value={nrDraftAmount ?? noise.amount}
+								min={0}
+								max={100}
+								step={1}
+								disabled={!noise.enabled}
+								ariaLabel={m.video_editor_audio_noise_aria()}
+								onValueChange={(v) => {
+									nrDraftAmount = clampNoiseReductionAmount(v);
+								}}
+								onValueCommit={(v) => {
+									const clamped = clampNoiseReductionAmount(v);
+									nrDraftAmount = null;
+									commitAudioPatch({
+										audioNoiseReductionAmount: clamped,
+										audioNoiseReductionEnabled: true
+									});
+								}}
+							/>
+						</div>
+					</div>
+				</EditorDisclosure>
+			{/if}
+
+			<ClipPlaybackSection itemId={item.id} {itemIds} {onedit} />
+
+			{#if audioItem}
+				<EditorDisclosure label={m.video_editor_advanced()}>
+					<details class="mt-2">
+						<summary
+							class="flex min-h-[25px] cursor-pointer list-none items-center justify-between px-2 text-[10px] text-muted-foreground focus-visible:outline-2 focus-visible:outline-ring"
+							title={m.video_editor_audio_fade_shape_description()}
+						>
+							<span>{m.video_editor_audio_fade_shape()}</span>
+						</summary>
+						<div class="grid grid-cols-2 gap-1 border-t border-border p-2">
+							{#each [{ label: m.video_editor_audio_fade_in_curve(), field: 'audioFadeInCurve', value: audioItem.audioFadeInCurve ?? 0, min: -1, max: 1 }, { label: m.video_editor_audio_fade_out_curve(), field: 'audioFadeOutCurve', value: audioItem.audioFadeOutCurve ?? 0, min: -1, max: 1 }, { label: m.video_editor_audio_fade_in_bias(), field: 'audioFadeInCurveX', value: audioItem.audioFadeInCurveX ?? 0.52, min: 0.04, max: 0.96 }, { label: m.video_editor_audio_fade_out_bias(), field: 'audioFadeOutCurveX', value: audioItem.audioFadeOutCurveX ?? 0.52, min: 0.04, max: 0.96 }] as control (control.field)}
+								<label class="text-[10px] text-muted-foreground">
+									{control.label}
+									<Input
+										class="mt-0.5 h-[25px] w-full bg-field text-xs text-field-foreground"
+										type="number"
+										min={control.min}
+										max={control.max}
+										step="0.01"
+										value={control.value}
+										onchange={(event) =>
+											commitAudioPatch({
+												[control.field]: Math.max(
+													control.min,
+													Math.min(control.max, event.currentTarget.valueAsNumber)
+												)
+											})}
+									/>
+								</label>
+							{/each}
+						</div>
+					</details>
+				</EditorDisclosure>
+			{/if}
+		{/if}
+
+		{#if ['video', 'image', 'lottie', 'text', 'shape', 'subtitle', 'composition'].includes(item.type)}
+			<CornerPinPropertiesPanel {item} {onedit} />
+		{/if}
+	</div>
+{/if}

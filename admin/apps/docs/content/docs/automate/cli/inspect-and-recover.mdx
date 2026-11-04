@@ -1,0 +1,61 @@
+---
+title: Inspect and recover
+description: Check publishing state, diagnose an instance, and retry failed destinations.
+icon: SearchCheck
+---
+
+Read the saved object after every write:
+
+```sh
+openpost publication view <publication-id> --json
+openpost publication events <publication-id> --json
+openpost jobs list --json
+```
+
+`scheduled`, `publishing`, and a queued job are not final provider outcomes. Inspect every Rendition. A failed Rendition includes provider error details when the provider returned them.
+
+## Retry one destination
+
+Retry only the failed account instead of republishing successful destinations:
+
+```sh
+openpost publication retry <publication-id> <account-id>
+```
+
+Read the Publication and events again after the retry. Do not assume a successful queue response means the provider accepted the post.
+
+## Check the instance
+
+```sh
+openpost instance health
+openpost auth status --json
+openpost provider readiness --json
+openpost instance diagnostics --json
+```
+
+`instance diagnostics` creates a secret-safe support snapshot. Add `--deployment docker-compose`, `--provider <key>`, or `--logs-file <path>` when those checks apply.
+
+## Give the CLI to an AI agent
+
+The `openpost-cli` agent skill teaches compatible coding assistants how to inspect context, choose a command, validate the result, and read the lifecycle afterward.
+
+```sh
+npx skills add https://github.com/getopenpost/openpost --skill openpost-cli
+```
+
+Use the skill when an assistant already has terminal access. Use [MCP](/mcp) when the assistant supports MCP and you want a direct OpenPost connection without relying on shell commands.
+
+## Read and answer Inbox activity
+
+```sh
+openpost inbox list --kind mention --limit 50
+openpost inbox list --kind review --account-id ACCOUNT_ID
+openpost inbox get ITEM_ID
+openpost inbox mark-read --kind mention
+openpost inbox state ITEM_ID --archived
+openpost inbox act REVIEW_ID --action reply --message 'Thanks for your feedback' --operation-id review-reply-20261024
+```
+
+The commands return JSON, including native subject context, feed health, moderation and job receipts. Pass `--cursor` with the previous response's `next_cursor` to continue a list. `mark-read` affects all matching unread items across every page. State changes are shared by the Workspace.
+
+Reuse `--operation-id` only when retrying the exact same action and text after an interrupted admission. Inspect the returned job before replacing a Google owner reply. `--action delete_reply` removes only the owner reply, never the customer's review. See the [Inbox guide](/guides/inbox) for provider permissions and moderation.

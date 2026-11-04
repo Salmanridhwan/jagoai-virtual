@@ -114,7 +114,7 @@ Tabel yang tersedia: `ringkasan`, `karyawan`, `keluaran`, `percakapan`, `biaya`.
 | Area | Pemilik | Berkas |
 |---|---|---|
 | backend | kamu | `app/*.py`, `tenant/`, `tests/` |
-| visual 3D | terpisah | `web3d/` |
+| visual 3D | terpisah | `visual/` |
 | visual 2D lama | dibekukan | `web/` |
 | tumpukan | bersama | `compose.jagoai.yml`, `deploy/` |
 
@@ -122,4 +122,4 @@ Yang tidak boleh disentuh dua-duanya tanpa bicara dulu: `app/server.py` bagian r
 
 ## Kalau backend belum siap
 
-Visual membawa cadangan `web3d/data/contoh-state.json` hasil rekaman nyata. Kalau `/api/state` tidak menjawab, visual memakai berkas itu, jadi pekerjaan visual tidak pernah tertahan oleh backend.
+Visual membawa cadangan `visual/data/contoh-state.json` hasil rekaman nyata. Kalau `/api/state` tidak menjawab, visual memakai berkas itu, jadi pekerjaan visual tidak pernah tertahan oleh backend.

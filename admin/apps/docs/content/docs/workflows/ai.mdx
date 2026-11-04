@@ -1,0 +1,29 @@
+---
+title: Generate text and decide branches with AI
+description: Generate text, choose a branch with AI, and inspect recorded usage.
+icon: Sparkles
+---
+
+Add **AI text** to generate text, or **AI decision** to choose a branch.
+
+If AI is unavailable on your self-hosted instance, [configure an AI provider](/self-hosting/ai) first.
+
+## Generate text
+
+1. Add **AI text** and write the **User message**.
+2. Optionally add a **System message** for tone or output instructions.
+3. Pass its text output to a later step.
+
+The **Write a draft with AI** recipe connects generation to draft creation and review. **AI draft** uses your configured AI Builder to create the post.
+
+## Choose a branch
+
+Write the criteria in **AI decision**. Jev returns a probability between 0 and 1. The Yes path runs at 0.5 or above; otherwise the No path runs. It returns no written explanation.
+
+[Test the node](/workflows/testing) against inputs you would accept and reject. Preview decisions are examples. Keep review before scheduling because real decisions can be wrong.
+
+## Check usage
+
+Expand an AI step in **Runs** to see tokens and provider-reported cost. Node tests make real AI calls and count toward usage; previews do not.
+
+There is no workflow spending cap. Missing cost does not mean a call was free. Check a few runs before enabling frequent triggers.

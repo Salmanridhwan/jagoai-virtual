@@ -1,0 +1,118 @@
+import assert from "node:assert/strict";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import { composePublicSite } from "./compose-public-site.mjs";
+
+test("composes both builds and keeps control files at the deployment root", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "openpost-public-site-"));
+  const marketing = path.join(root, "marketing");
+  const docs = path.join(root, "documentation");
+  const output = path.join(root, "output");
+  await Promise.all([mkdir(path.join(marketing, "tools"), { recursive: true }), mkdir(docs)]);
+  await Promise.all([
+    writeFile(path.join(marketing, "index.html"), "marketing"),
+    writeFile(path.join(marketing, "index.md"), "marketing Markdown"),
+    writeFile(path.join(marketing, "tools/example.md"), "tool Markdown"),
+    writeFile(
+      path.join(marketing, "_headers"),
+      "/\n  Vary: Accept\n/*.md\n  Content-Type: text/markdown; charset=utf-8\n  Vary: Accept\n",
+    ),
+    writeFile(
+      path.join(marketing, "_redirects"),
+      "/self-hosting/* /docs/self-hosting/:splat 301\n/features /#features 301\n",
+    ),
+    writeFile(path.join(docs, "index.html"), "documentation"),
+    writeFile(
+      path.join(docs, "_headers"),
+      "/*.md\n  Content-Type: text/markdown; charset=utf-8\n  Vary: Accept\n  Cache-Control: public, max-age=60\n/docs/guides/quickstart\n  X-Already-Mounted: yes\n/api/search\n  Content-Type: application/json\n/docs/*\n  Vary: Accept\n",
+    ),
+    writeFile(
+      path.join(docs, "_redirects"),
+      "/usage /guides/quickstart 301\n/development https://github.com/getopenpost/openpost 301\n",
+    ),
+  ]);
+
+  await composePublicSite({
+    marketingDirectory: marketing,
+    docsDirectory: docs,
+    outputDirectory: output,
+  });
+
+  assert.equal(await readFile(path.join(output, "index.html"), "utf8"), "marketing");
+  assert.equal(await readFile(path.join(output, "docs/index.html"), "utf8"), "documentation");
+  const headers = await readFile(path.join(output, "_headers"), "utf8");
+  assert.match(headers, /\/docs\/api\/search/u);
+  assert.match(headers, /^\/docs\/guides\/quickstart\n  X-Already-Mounted: yes$/mu);
+  assert.doesNotMatch(headers, /\/docs\/docs\//u);
+  assert.doesNotMatch(headers, /^\/\*\.md$/mu);
+  assert.match(headers, /^\/:name\.md\n  Content-Type: text\/markdown; charset=utf-8$/mu);
+  assert.match(headers, /^\/tools\/\*\.md\n  Content-Type: text\/markdown; charset=utf-8$/mu);
+  assert.match(
+    headers,
+    /\/docs\/\*\.md\n  Content-Type: text\/markdown; charset=utf-8\n  Cache-Control: public, max-age=60/u,
+  );
+  assert.doesNotMatch(headers, /\/docs\/\*\.md\n(?:  .+\n)*  Vary: Accept/u);
+  assert.match(
+    await readFile(path.join(output, "_redirects"), "utf8"),
+    /\/docs\/usage \/docs\/guides\/quickstart 301/u,
+  );
+  const redirects = await readFile(path.join(output, "_redirects"), "utf8");
+  assert.match(
+    redirects,
+    /^\/docs\/development https:\/\/github\.com\/getopenpost\/openpost 301$/mu,
+  );
+  assert.ok(
+    redirects.indexOf("/docs/usage ") < redirects.indexOf("/self-hosting/* "),
+    "Static documentation redirects must precede wildcards to avoid Cloudflare's dynamic rule limit",
+  );
+  await assert.rejects(readFile(path.join(output, "docs/_headers"), "utf8"), /ENOENT/u);
+});
+
+test("one-segment Markdown headers keep the composed site within the Pages rule limit", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "openpost-public-headers-"));
+  const marketing = path.join(root, "marketing");
+  const docs = path.join(root, "documentation");
+  const output = path.join(root, "output");
+  await Promise.all([mkdir(marketing), mkdir(docs)]);
+  await Promise.all([
+    ...Array.from({ length: 22 }, (_, index) =>
+      writeFile(path.join(marketing, `page-${index}.md`), "Markdown"),
+    ),
+    writeFile(
+      path.join(marketing, "_headers"),
+      `/*.md\n  Content-Type: text/markdown; charset=utf-8\n${Array.from({ length: 80 }, (_, index) => `/page-${index}\n  Vary: Accept`).join("\n")}\n`,
+    ),
+    writeFile(path.join(marketing, "_redirects"), ""),
+    writeFile(path.join(docs, "_headers"), "/docs/*\n  Vary: Accept\n"),
+    writeFile(path.join(docs, "_redirects"), ""),
+  ]);
+
+  await composePublicSite({
+    marketingDirectory: marketing,
+    docsDirectory: docs,
+    outputDirectory: output,
+  });
+
+  const headers = await readFile(path.join(output, "_headers"), "utf8");
+  assert.match(headers, /^\/:name\.md\n  Content-Type: text\/markdown; charset=utf-8$/mu);
+  assert.ok(headers.split("\n").filter((line) => line.startsWith("/")).length <= 100);
+});
+
+test("rejects a marketing route that collides with the docs mount", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "openpost-public-site-collision-"));
+  const marketing = path.join(root, "marketing");
+  const docs = path.join(root, "documentation");
+  await Promise.all([mkdir(path.join(marketing, "docs"), { recursive: true }), mkdir(docs)]);
+
+  await assert.rejects(
+    composePublicSite({
+      marketingDirectory: marketing,
+      docsDirectory: docs,
+      outputDirectory: root,
+    }),
+    /marketing output already owns \/docs/u,
+  );
+});

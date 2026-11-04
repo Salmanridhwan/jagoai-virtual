@@ -1,0 +1,895 @@
+<script lang="ts">
+	import { appBranding } from '$lib/app-branding.svelte';
+	import { projectPresetName } from '$lib/video-editor/project/preset-label';
+	import { goto } from '$app/navigation';
+	import EditorStart from '$lib/components/editor-start.svelte';
+	import EditorFormatButton from '$lib/components/editor-format-button.svelte';
+	import { ThemeIcon, ProtectedIcon } from '$lib/themes/icons';
+	import {
+		DEFAULT_PROJECT_CREATION_SETTINGS,
+		PROJECT_PRESETS
+	} from '$lib/video-editor/project/project-presets';
+	import { Button } from '$lib/components/ui/button';
+	import { m } from '$lib/paraglide/messages';
+	import { showToast } from '$lib/toast';
+	import ProjectBrowser from '$lib/video-editor/components/project-browser.svelte';
+	import CloudProjectBrowser from '$lib/video-editor/components/cloud-project-browser.svelte';
+	import WorkspaceIndicator from '$lib/video-editor/components/workspace-indicator.svelte';
+	import WorkspaceGatePanel from '$lib/video-editor/components/workspace-gate-panel.svelte';
+	import { createWorkspaceGate } from '$lib/video-editor/gate/workspace-gate.svelte';
+	import { saveProjectBundle } from '$lib/video-editor/project-bundle/bundle-export';
+	import { importProjectBundle } from '$lib/video-editor/project-bundle/bundle-import';
+	import type { BundleProgress } from '$lib/video-editor/project-bundle/bundle-types';
+	import {
+		downloadProjectSnapshot,
+		importProjectSnapshotFile
+	} from '$lib/video-editor/project-bundle/snapshot-service';
+	import { duplicateProjectWithMedia } from '$lib/video-editor/project/project-operations';
+	import type { ProjectDetailsUpdate } from '$lib/video-editor/project/project-details';
+	import type { ProjectCreationSettings } from '$lib/video-editor/project/project-presets';
+	import { permanentlyDeleteProject } from '$lib/video-editor/project/project-trash';
+	import type { Project } from '$lib/video-editor/project/types';
+	import {
+		CloudVideoProjectRepository,
+		type CloudVideoProjectSummary
+	} from '$lib/video-editor/cloud/project-repository';
+	import { importLocalProjectToCloud } from '$lib/video-editor/cloud/import-local-project';
+	import { saveCloudProjectBundle } from '$lib/video-editor/cloud/export-project-bundle';
+	import {
+		isCloudProjectAvailableOffline,
+		keepCloudProjectAvailableOffline,
+		removeCloudProjectOfflineCopy
+	} from '$lib/video-editor/cloud/offline-project-cache';
+	import { workspaceCtx } from '$lib/stores/workspace.svelte';
+	import { createWorkspaceProjectCatalog } from '$lib/video-editor/project/workspace-project-catalog.svelte';
+	import { onPermissionLost } from '$lib/video-editor/workspace-fs/root';
+	import { createProject, updateProject } from '$lib/video-editor/workspace-fs/projects';
+	import {
+		DEFAULT_TRASH_TTL_MS,
+		listTrashedProjects,
+		restoreProject,
+		softDeleteProject,
+		sweepTrashOlderThan,
+		type TrashedProjectEntry
+	} from '$lib/video-editor/workspace-fs/trash';
+	import { onMount, untrack } from 'svelte';
+
+	const gate = createWorkspaceGate();
+	const projectCatalog = createWorkspaceProjectCatalog(gate);
+	let trashedProjects = $state.raw<TrashedProjectEntry[]>([]);
+	let trashError = $state('');
+	let trashBusyId = $state<string | null>(null);
+	let emptyingTrash = $state(false);
+	let creating = $state(false);
+	let importing = $state(false);
+	let duplicatingId = $state<string | null>(null);
+	let exportingId = $state<string | null>(null);
+	let exportingKind = $state<'json' | 'bundle' | null>(null);
+	let bundleProgress = $state<BundleProgress | null>(null);
+	let bundleOperation = $state<'import' | 'export' | null>(null);
+	let bundleController = $state<AbortController | null>(null);
+	let bundleCanceling = $state(false);
+	let trashLoadGeneration = 0;
+	let storageMode = $state<'cloud' | 'local'>('cloud');
+	let storageModeChosen = $state(false);
+	let cloudProjects = $state<CloudVideoProjectSummary[]>([]);
+	let cloudTrashedProjects = $state<CloudVideoProjectSummary[]>([]);
+	let cloudLoading = $state(false);
+	let cloudError = $state('');
+	let cloudCreating = $state(false);
+	let cloudImportingId = $state<string | null>(null);
+	let cloudExportingId = $state<string | null>(null);
+	let cloudOfflineProjectIds = $state<string[]>([]);
+	let cloudOfflineBusyId = $state<string | null>(null);
+	let cloudLoadGeneration = 0;
+	let cloudWorkspaceId = $derived(workspaceCtx.currentWorkspace?.id ?? '');
+	let cloudRepository = $derived(
+		cloudWorkspaceId ? new CloudVideoProjectRepository<Project>(cloudWorkspaceId) : null
+	);
+
+	async function loadCloudProjects(): Promise<void> {
+		const generation = ++cloudLoadGeneration;
+		const repository = cloudRepository;
+		if (!repository) {
+			cloudProjects = [];
+			cloudTrashedProjects = [];
+			return;
+		}
+		cloudLoading = true;
+		cloudError = '';
+		try {
+			const projects = await repository.listSummaries(true);
+			if (generation !== cloudLoadGeneration) return;
+			cloudProjects = projects.filter(
+				(project) => !project.trashedAt && project.schemaFamily !== 'quick-cut'
+			);
+			cloudTrashedProjects = projects.filter(
+				(project) => project.trashedAt && project.schemaFamily !== 'quick-cut'
+			);
+			cloudLoading = false;
+			void loadCloudOfflineProjectIds(generation, cloudWorkspaceId, cloudProjects);
+		} catch {
+			if (generation !== cloudLoadGeneration) return;
+			cloudError = m.video_editor_cloud_projects_load_failed();
+		} finally {
+			if (generation === cloudLoadGeneration) cloudLoading = false;
+		}
+	}
+
+	async function loadCloudOfflineProjectIds(
+		generation: number,
+		workspaceId: string,
+		projects: CloudVideoProjectSummary[]
+	): Promise<void> {
+		try {
+			const ids = (
+				await Promise.all(
+					projects.map(async (project) =>
+						(await isCloudProjectAvailableOffline(workspaceId, project.id)) ? project.id : null
+					)
+				)
+			).filter((id): id is string => id !== null);
+			if (generation === cloudLoadGeneration && workspaceId === cloudWorkspaceId) {
+				cloudOfflineProjectIds = ids;
+			}
+		} catch {
+			// Offline state is an enhancement. Cloud project loading remains usable if storage is blocked.
+		}
+	}
+
+	$effect(() => {
+		void cloudWorkspaceId;
+		if (!cloudWorkspaceId) storageMode = 'local';
+		else {
+			if (!storageModeChosen) storageMode = 'cloud';
+			untrack(() => void loadCloudProjects());
+		}
+	});
+
+	async function createCloudProject(
+		name: string,
+		settings: ProjectCreationSettings
+	): Promise<void> {
+		const repository = cloudRepository;
+		if (!repository || cloudCreating) return;
+		cloudCreating = true;
+		try {
+			const { createBlankProject } = await import('$lib/video-editor/project/defaults');
+			const project = createBlankProject(name, settings);
+			const created = await repository.create(project.name, project);
+			await goto(`/video-editor/${created.id}?storage=cloud`);
+		} catch (error) {
+			showToast(error instanceof Error ? error.message : String(error), 'error');
+		} finally {
+			cloudCreating = false;
+		}
+	}
+
+	async function startProject(
+		settings: ProjectCreationSettings = DEFAULT_PROJECT_CREATION_SETTINGS
+	): Promise<void> {
+		if (creating || cloudCreating || gate.busy || importing || bundleOperation) return;
+		if (storageMode === 'cloud' && cloudRepository) {
+			await createCloudProject(m.video_editor_project_untitled(), settings);
+			return;
+		}
+		if (gate.state === 'pick') await gate.pickFolder();
+		else if (gate.state === 'reconnect') await gate.reconnect();
+		if (gate.state !== 'ready') return;
+		await handleCreateProject(m.video_editor_project_untitled(), settings);
+	}
+
+	async function openCloudProject(project: Pick<CloudVideoProjectSummary, 'id'>): Promise<void> {
+		await goto(`/video-editor/${project.id}?storage=cloud`);
+	}
+
+	async function importLocalProject(project: Project): Promise<void> {
+		const repository = cloudRepository;
+		if (!repository || cloudImportingId) return;
+		cloudImportingId = project.id;
+		try {
+			const imported = await importLocalProjectToCloud(project, repository);
+			await loadCloudProjects();
+			await openCloudProject(imported);
+		} catch (error) {
+			showToast(error instanceof Error ? error.message : String(error), 'error');
+		} finally {
+			cloudImportingId = null;
+		}
+	}
+
+	async function trashCloudProject(project: CloudVideoProjectSummary): Promise<void> {
+		const repository = cloudRepository;
+		if (!repository) return;
+		try {
+			await repository.trash(project.id);
+			await removeCloudProjectOfflineCopy(repository.workspaceId, project.id);
+			await loadCloudProjects();
+			showToast(m.editors_delete_cloud_video_success(), 'success');
+		} catch {
+			showToast(m.editors_delete_cloud_video_failed(), 'error');
+		}
+	}
+
+	async function toggleCloudProjectOffline(project: CloudVideoProjectSummary): Promise<void> {
+		const repository = cloudRepository;
+		if (!repository || cloudOfflineBusyId) return;
+		cloudOfflineBusyId = project.id;
+		try {
+			if (cloudOfflineProjectIds.includes(project.id)) {
+				await removeCloudProjectOfflineCopy(repository.workspaceId, project.id);
+				cloudOfflineProjectIds = cloudOfflineProjectIds.filter((id) => id !== project.id);
+			} else {
+				await keepCloudProjectAvailableOffline(repository, project.id);
+				cloudOfflineProjectIds = [...cloudOfflineProjectIds, project.id];
+			}
+		} catch (error) {
+			showToast(error instanceof Error ? error.message : m.video_editor_offline_failed(), 'error');
+		} finally {
+			cloudOfflineBusyId = null;
+		}
+	}
+
+	async function restoreCloudProject(project: CloudVideoProjectSummary): Promise<void> {
+		const repository = cloudRepository;
+		if (!repository) return;
+		try {
+			await repository.restore(project.id);
+			await loadCloudProjects();
+			showToast(m.video_editor_project_restored({ name: project.name }), 'success');
+		} catch (error) {
+			showToast(error instanceof Error ? error.message : String(error), 'error');
+		}
+	}
+
+	async function loadTrash(sweepExpired = false): Promise<void> {
+		if (gate.state !== 'ready') return;
+		const generation = ++trashLoadGeneration;
+		trashError = '';
+		try {
+			if (sweepExpired) {
+				await sweepTrashOlderThan(DEFAULT_TRASH_TTL_MS, async (id) => {
+					await permanentlyDeleteProject(id);
+				});
+			}
+			const nextTrashedProjects = await listTrashedProjects();
+			if (generation === trashLoadGeneration) trashedProjects = nextTrashedProjects;
+		} catch (error) {
+			if (generation === trashLoadGeneration) {
+				trashError = error instanceof Error ? error.message : String(error);
+			}
+		}
+	}
+
+	async function loadProjects(sweepExpired = false): Promise<void> {
+		await Promise.all([projectCatalog.refresh(), loadTrash(sweepExpired)]);
+	}
+
+	$effect(() => {
+		const state = gate.state;
+		void gate.workspaceRevision;
+		if (state === 'ready') {
+			untrack(() => void loadTrash(true));
+		} else {
+			trashLoadGeneration += 1;
+			trashedProjects = [];
+			trashError = '';
+		}
+	});
+
+	onMount(() => {
+		const stopPermissionListener = onPermissionLost(() => {
+			showToast(m.video_editor_gate_permission_lost());
+		});
+		return () => {
+			trashLoadGeneration += 1;
+			stopPermissionListener();
+		};
+	});
+
+	async function openProject(project: Project): Promise<void> {
+		await goto(`/video-editor/${project.id}`);
+	}
+
+	async function handleCreateProject(
+		name: string,
+		settings: ProjectCreationSettings
+	): Promise<boolean> {
+		if (creating || importing || exportingId || bundleOperation) return false;
+		creating = true;
+		try {
+			const { createBlankProject } = await import('$lib/video-editor/project/defaults');
+			const project = createBlankProject(name || m.video_editor_project_untitled(), settings);
+			await createProject(project);
+			await loadProjects();
+			await openProject(project);
+			return true;
+		} catch (error) {
+			showToast(error instanceof Error ? error.message : String(error), 'error');
+			return false;
+		} finally {
+			creating = false;
+		}
+	}
+
+	async function handleUpdateProject(
+		project: Project,
+		update: ProjectDetailsUpdate
+	): Promise<string | null> {
+		if (importing || duplicatingId || exportingId || bundleOperation) {
+			return m.video_editor_project_edit_busy();
+		}
+		try {
+			await updateProject(project.id, update);
+			await loadProjects();
+			showToast(m.video_editor_project_changes_saved(), 'success');
+			return null;
+		} catch (error) {
+			return error instanceof Error ? error.message : String(error);
+		}
+	}
+
+	async function handleDuplicate(project: Project): Promise<void> {
+		if (duplicatingId || importing || exportingId || bundleOperation) return;
+		duplicatingId = project.id;
+		try {
+			const duplicate = await duplicateProjectWithMedia(
+				project.id,
+				m.video_editor_project_copy_name({ name: project.name })
+			);
+			await loadProjects();
+			showToast(m.video_editor_project_duplicated({ name: duplicate.name }), 'success');
+		} catch (error) {
+			showToast(error instanceof Error ? error.message : String(error), 'error');
+		} finally {
+			duplicatingId = null;
+		}
+	}
+
+	async function handleDelete(project: Project): Promise<void> {
+		if (importing || duplicatingId || exportingId || bundleOperation) return;
+		try {
+			await softDeleteProject(project.id);
+			await loadProjects();
+			showToast(m.video_editor_project_moved_to_trash(), 'success', {
+				actionLabel: m.video_editor_project_restore(),
+				onAction: () => void handleRestore(project.id, project.name)
+			});
+		} catch (error) {
+			showToast(error instanceof Error ? error.message : String(error), 'error');
+		}
+	}
+
+	async function handleDeleteBatch(targets: Project[]): Promise<string[]> {
+		if (
+			targets.length === 0 ||
+			creating ||
+			importing ||
+			duplicatingId ||
+			exportingId ||
+			bundleOperation
+		) {
+			return targets.map((project) => project.id);
+		}
+		const moved: Project[] = [];
+		const failed: Project[] = [];
+		for (const project of targets) {
+			try {
+				await softDeleteProject(project.id);
+				moved.push(project);
+			} catch {
+				failed.push(project);
+			}
+		}
+		await loadProjects();
+		const undoMoved = (): void => {
+			void (async () => {
+				const restoreFailures: Project[] = [];
+				let restored = 0;
+				for (const project of moved) {
+					try {
+						await restoreProject(project.id);
+						restored += 1;
+					} catch {
+						restoreFailures.push(project);
+					}
+				}
+				await loadProjects();
+				if (restoreFailures.length > 0) {
+					showToast(
+						m.video_editor_project_bulk_restore_partial({
+							restored,
+							names: restoreFailures.map((project) => project.name).join(', ')
+						}),
+						'warning'
+					);
+				} else {
+					showToast(m.video_editor_project_bulk_restored({ count: restored }), 'success');
+				}
+			})().catch((error) =>
+				showToast(error instanceof Error ? error.message : String(error), 'error')
+			);
+		};
+		if (failed.length > 0) {
+			showToast(
+				m.video_editor_project_bulk_trash_partial({
+					moved: moved.length,
+					names: failed.map((project) => project.name).join(', ')
+				}),
+				'warning',
+				moved.length > 0
+					? {
+							actionLabel: m.video_editor_project_restore(),
+							onAction: undoMoved
+						}
+					: undefined
+			);
+			return failed.map((project) => project.id);
+		}
+		showToast(m.video_editor_project_bulk_moved_to_trash({ count: moved.length }), 'success', {
+			actionLabel: m.video_editor_project_restore(),
+			onAction: undoMoved
+		});
+		return [];
+	}
+
+	async function handleRestore(projectId: string, projectName: string): Promise<void> {
+		if (trashBusyId || emptyingTrash) return;
+		trashBusyId = projectId;
+		try {
+			await restoreProject(projectId);
+			await loadProjects();
+			showToast(m.video_editor_project_restored({ name: projectName }), 'success');
+		} catch (error) {
+			showToast(error instanceof Error ? error.message : String(error), 'error');
+		} finally {
+			trashBusyId = null;
+		}
+	}
+
+	async function handlePurge(entry: TrashedProjectEntry): Promise<void> {
+		if (trashBusyId || emptyingTrash) return;
+		trashBusyId = entry.id;
+		try {
+			const result = await permanentlyDeleteProject(entry.id);
+			await loadProjects();
+			if (result.failedMediaIds.length > 0) {
+				showToast(
+					m.video_editor_project_media_cleanup_partial({
+						count: result.failedMediaIds.length
+					}),
+					'warning'
+				);
+			} else {
+				showToast(
+					m.video_editor_project_deleted_forever({
+						name: entry.marker.originalName
+					}),
+					'success'
+				);
+			}
+		} finally {
+			trashBusyId = null;
+		}
+	}
+
+	async function handleEmptyTrash(): Promise<void> {
+		if (trashBusyId || emptyingTrash) return;
+		emptyingTrash = true;
+		const snapshot = [...trashedProjects];
+		let deleted = 0;
+		const failed: TrashedProjectEntry[] = [];
+		let mediaCleanupFailures = 0;
+		try {
+			for (const entry of snapshot) {
+				try {
+					const result = await permanentlyDeleteProject(entry.id);
+					deleted += 1;
+					mediaCleanupFailures += result.failedMediaIds.length;
+				} catch {
+					failed.push(entry);
+				}
+			}
+			await loadProjects();
+			if (failed.length > 0) {
+				showToast(
+					m.video_editor_project_trash_partial({
+						deleted,
+						names: failed.map((entry) => entry.marker.originalName).join(', ')
+					}),
+					'warning'
+				);
+			} else if (mediaCleanupFailures > 0) {
+				showToast(
+					m.video_editor_project_media_cleanup_partial({
+						count: mediaCleanupFailures
+					}),
+					'warning'
+				);
+			} else {
+				showToast(m.video_editor_project_trash_emptied({ count: deleted }), 'success');
+			}
+		} finally {
+			emptyingTrash = false;
+		}
+	}
+
+	async function handleImportJson(file: File): Promise<void> {
+		if (importing || exportingId || bundleOperation) return;
+		importing = true;
+		try {
+			const result = await importProjectSnapshotFile(file);
+			await loadProjects();
+			if (result.unmatchedMedia.length > 0) {
+				showToast(
+					m.video_editor_project_imported_missing_media({
+						name: result.project.name,
+						count: result.unmatchedMedia.length
+					}),
+					'warning'
+				);
+			} else {
+				showToast(m.video_editor_project_imported({ name: result.project.name }), 'success');
+			}
+		} catch (error) {
+			showToast(error instanceof Error ? error.message : String(error), 'error');
+		} finally {
+			importing = false;
+		}
+	}
+
+	async function handleImportBundle(file: File): Promise<void> {
+		if (importing || exportingId || bundleOperation) return;
+		const controller = new AbortController();
+		importing = true;
+		bundleOperation = 'import';
+		bundleController = controller;
+		bundleCanceling = false;
+		bundleProgress = { stage: 'validating', percent: 0 };
+		try {
+			const result = await importProjectBundle(
+				file,
+				{ signal: controller.signal },
+				(progress) => (bundleProgress = progress)
+			);
+			await loadProjects();
+			showToast(
+				m.video_editor_project_bundle_imported({
+					name: result.projectName,
+					imported: result.mediaImported,
+					reused: result.mediaReused
+				}),
+				'success'
+			);
+		} catch (error) {
+			if (
+				error instanceof DOMException &&
+				error.name === 'AbortError' &&
+				controller.signal.aborted
+			) {
+				showToast(m.video_editor_project_bundle_canceled());
+			} else if (!(error instanceof DOMException && error.name === 'AbortError')) {
+				showToast(error instanceof Error ? error.message : String(error), 'error');
+			}
+		} finally {
+			importing = false;
+			if (bundleController === controller) {
+				bundleController = null;
+				bundleCanceling = false;
+				bundleOperation = null;
+				bundleProgress = null;
+			}
+		}
+	}
+
+	async function handleExportJson(project: Project): Promise<void> {
+		if (exportingId || importing || bundleOperation) return;
+		exportingId = project.id;
+		exportingKind = 'json';
+		try {
+			await downloadProjectSnapshot(project.id);
+		} catch (error) {
+			showToast(error instanceof Error ? error.message : String(error), 'error');
+		} finally {
+			exportingId = null;
+			exportingKind = null;
+		}
+	}
+
+	async function handleExportBundle(
+		project: Pick<Project, 'id' | 'name'>,
+		storage: 'local' | 'cloud'
+	): Promise<void> {
+		const repository = cloudRepository;
+		if (storage === 'cloud' && !repository) return;
+		if (exportingId || importing || bundleOperation) return;
+		const controller = new AbortController();
+		if (storage === 'cloud') cloudExportingId = project.id;
+		else exportingId = project.id;
+		exportingKind = 'bundle';
+		bundleOperation = 'export';
+		bundleController = controller;
+		bundleCanceling = false;
+		bundleProgress = { stage: 'collecting', percent: 0 };
+		try {
+			const onProgress = (progress: BundleProgress) => (bundleProgress = progress);
+			if (storage === 'cloud' && repository) {
+				await saveCloudProjectBundle(
+					repository,
+					project.id,
+					project.name,
+					onProgress,
+					controller.signal
+				);
+			} else {
+				await saveProjectBundle(project.id, project.name, onProgress, controller.signal);
+			}
+			showToast(m.video_editor_project_bundle_exported({ name: project.name }), 'success');
+		} catch (error) {
+			if (
+				error instanceof DOMException &&
+				error.name === 'AbortError' &&
+				controller.signal.aborted
+			) {
+				showToast(m.video_editor_project_bundle_canceled());
+			} else if (!(error instanceof DOMException && error.name === 'AbortError')) {
+				showToast(error instanceof Error ? error.message : String(error), 'error');
+			}
+		} finally {
+			cloudExportingId = null;
+			exportingId = null;
+			exportingKind = null;
+			if (bundleController === controller) {
+				bundleController = null;
+				bundleCanceling = false;
+				bundleOperation = null;
+				bundleProgress = null;
+			}
+		}
+	}
+
+	function handleCancelBundle(): void {
+		if (!bundleController || bundleController.signal.aborted) return;
+		bundleCanceling = true;
+		bundleController.abort();
+	}
+</script>
+
+<svelte:head>
+	<title>{appBranding.title(m.video_editor_title())}</title>
+	<meta
+		name="description"
+		content="Record or import footage, edit for four social formats, and export without a watermark."
+	/>
+	<link rel="canonical" href="https://app.openpo.st/video-editor" />
+	<meta property="og:site_name" content="OpenPost" />
+	<meta property="og:type" content="website" />
+	<meta property="og:title" content="Free social media video editor - OpenPost Video Editor" />
+	<meta
+		property="og:description"
+		content="Record or import footage, edit for four social formats, and export without a watermark."
+	/>
+	<meta property="og:url" content="https://app.openpo.st/video-editor" />
+	<meta property="og:image" content="https://app.openpo.st/og/app-video-editor.png" />
+	<meta property="og:image:secure_url" content="https://app.openpo.st/og/app-video-editor.png" />
+	<meta property="og:image:type" content="image/png" />
+	<meta property="og:image:width" content="1200" />
+	<meta property="og:image:height" content="630" />
+	<meta property="og:image:alt" content="Video Editor OpenPost editor social preview." />
+	<meta name="twitter:card" content="summary_large_image" />
+	<meta name="twitter:title" content="Free social media video editor - OpenPost Video Editor" />
+	<meta
+		name="twitter:description"
+		content="Record or import footage, edit for four social formats, and export without a watermark."
+	/>
+	<meta name="twitter:image" content="https://app.openpo.st/og/app-video-editor.png" />
+	<meta name="twitter:image:alt" content="Video Editor OpenPost editor social preview." />
+</svelte:head>
+
+<div
+	class="video-editor-theme flex min-h-dvh flex-col bg-[var(--video-editor-canvas)] text-[var(--video-editor-text)]"
+>
+	<EditorStart
+		title={m.editor_start_video_title()}
+		description={m.editor_start_video_description()}
+	>
+		{#snippet utility()}
+			{#if cloudWorkspaceId}
+				<span class="text-xs text-muted-foreground">{m.editor_storage_destination()}</span>
+				<div
+					class="flex rounded-lg border border-[var(--video-editor-border)] p-0.5"
+					role="group"
+					aria-label={m.editor_storage_destination()}
+				>
+					<Button
+						variant={storageMode === 'cloud' ? 'secondary' : 'ghost'}
+						size="xs"
+						aria-pressed={storageMode === 'cloud'}
+						onclick={() => {
+							storageModeChosen = true;
+							storageMode = 'cloud';
+						}}>{m.editor_storage_choice_cloud()}</Button
+					>
+					<Button
+						variant={storageMode === 'local' ? 'secondary' : 'ghost'}
+						size="xs"
+						aria-pressed={storageMode === 'local'}
+						onclick={() => {
+							storageModeChosen = true;
+							storageMode = 'local';
+						}}>{m.editor_storage_choice_local()}</Button
+					>
+				</div>
+			{/if}
+			{#if storageMode === 'local' && gate.state === 'ready'}
+				<WorkspaceIndicator {gate} />
+			{/if}
+		{/snippet}
+		{#snippet actions()}
+			<Button href="/quick-cut" variant="outline">{m.video_editor_quick_choice_action()}</Button>
+			<Button
+				onclick={() => void startProject()}
+				disabled={creating ||
+					cloudCreating ||
+					gate.busy ||
+					importing ||
+					bundleOperation !== null ||
+					(storageMode === 'local' &&
+						(gate.state === 'initializing' || gate.state === 'unavailable'))}
+			>
+				{#if creating || cloudCreating || gate.busy}<ProtectedIcon
+						icon="loading"
+						class="animate-spin motion-reduce:animate-none"
+					/>{:else}<ThemeIcon role="add" />{/if}
+				{m.video_editor_full_choice()}
+			</Button>
+		{/snippet}
+		{#if (storageMode === 'cloud' && cloudRepository) || gate.state === 'pick' || gate.state === 'ready' || gate.state === 'reconnect'}
+			<section class="mb-8" aria-labelledby="video-formats-heading">
+				<h2 id="video-formats-heading" class="mb-3 text-base font-semibold">
+					{m.image_editor_choose_format()}
+				</h2>
+				<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+					{#each PROJECT_PRESETS.slice(0, 4) as preset (preset.id)}
+						<EditorFormatButton
+							label={projectPresetName(preset.id)}
+							width={preset.width}
+							height={preset.height}
+							disabled={creating ||
+								cloudCreating ||
+								gate.busy ||
+								importing ||
+								bundleOperation !== null}
+							onclick={() => void startProject(preset)}
+						/>
+					{/each}
+				</div>
+			</section>
+		{/if}
+
+		{#if bundleProgress && bundleOperation}
+			<div
+				class="mt-4 rounded-lg border border-[var(--video-editor-border)] bg-[var(--video-editor-panel)] px-3 py-2"
+				role="status"
+				aria-live="polite"
+			>
+				<div class="flex items-center justify-between gap-3 text-xs">
+					<span class="font-medium">
+						{bundleOperation === 'import'
+							? m.video_editor_project_bundle_importing()
+							: m.video_editor_project_bundle_exporting()}
+					</span>
+					<div class="flex items-center gap-2">
+						<span>{Math.round(bundleProgress.percent)}%</span>
+						<Button
+							variant="ghost"
+							size="xs"
+							disabled={bundleCanceling}
+							onclick={handleCancelBundle}
+						>
+							{#if bundleCanceling}
+								<ProtectedIcon
+									icon="loading"
+									class="size-3.5 animate-spin motion-reduce:animate-none"
+								/>
+							{:else}
+								<ThemeIcon role="close" class="size-3.5" />
+							{/if}
+							{bundleCanceling
+								? m.video_editor_project_bundle_canceling()
+								: m.video_editor_project_bundle_cancel()}
+						</Button>
+					</div>
+				</div>
+				<div
+					class="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[var(--video-editor-control)]"
+					role="progressbar"
+					aria-valuemin="0"
+					aria-valuemax="100"
+					aria-valuenow={Math.round(bundleProgress.percent)}
+					aria-label={bundleOperation === 'import'
+						? m.video_editor_project_bundle_importing()
+						: m.video_editor_project_bundle_exporting()}
+				>
+					<div
+						class="h-full rounded-full bg-primary transition-[width] motion-reduce:transition-none"
+						style:width={`${Math.max(0, Math.min(100, bundleProgress.percent))}%`}
+					></div>
+				</div>
+				{#if bundleProgress.currentFile}
+					<p
+						class="mt-1 truncate text-xs text-[var(--video-editor-muted)]"
+						title={bundleProgress.currentFile}
+					>
+						{bundleProgress.currentFile}
+					</p>
+				{/if}
+			</div>
+		{/if}
+
+		{#if cloudRepository}
+			<CloudProjectBrowser
+				projects={cloudProjects}
+				trashedProjects={cloudTrashedProjects}
+				loading={cloudLoading}
+				error={cloudError}
+				localProjects={projectCatalog.projects}
+				importingId={cloudImportingId}
+				exportingId={cloudExportingId}
+				offlineProjectIds={cloudOfflineProjectIds}
+				offlineBusyId={cloudOfflineBusyId}
+				onopen={openCloudProject}
+				ontrash={trashCloudProject}
+				onrestore={restoreCloudProject}
+				onimportlocal={importLocalProject}
+				onexport={(project) => handleExportBundle(project, 'cloud')}
+				ontoggleoffline={toggleCloudProjectOffline}
+				onrefresh={loadCloudProjects}
+			/>
+		{/if}
+		<section class="mt-8 border-t pt-6" aria-label={m.video_editor_local_only()}>
+			<h2 class="mb-3 text-base font-semibold">{m.video_editor_local_only()}</h2>
+			{#if gate.state !== 'ready'}
+				<WorkspaceGatePanel {gate} variant="inline" />
+				<div class="mt-3 space-y-2">
+					<Button variant="outline" disabled aria-describedby="bundle-folder-required">
+						{m.video_editor_project_import_bundle()}
+					</Button>
+					<p id="bundle-folder-required" class="text-sm text-muted-foreground">
+						{m.video_editor_project_bundle_folder_required()}
+					</p>
+				</div>
+			{:else if gate.state === 'ready'}
+				<ProjectBrowser
+					projects={projectCatalog.projects}
+					thumbnailUrls={projectCatalog.thumbnailUrls}
+					{trashedProjects}
+					loading={projectCatalog.loading}
+					error={projectCatalog.error}
+					{trashError}
+					{trashBusyId}
+					{emptyingTrash}
+					{creating}
+					{importing}
+					{duplicatingId}
+					{exportingId}
+					{exportingKind}
+					{bundleOperation}
+					oncreate={handleCreateProject}
+					onimportjson={handleImportJson}
+					onimportbundle={handleImportBundle}
+					onopen={openProject}
+					onupdate={handleUpdateProject}
+					onduplicate={handleDuplicate}
+					onexportjson={handleExportJson}
+					onexportbundle={(project) => handleExportBundle(project, 'local')}
+					ondelete={handleDelete}
+					ondeletebatch={handleDeleteBatch}
+					onrestore={handleRestore}
+					onpurge={handlePurge}
+					onemptytrash={handleEmptyTrash}
+				/>
+			{/if}
+		</section>
+	</EditorStart>
+</div>

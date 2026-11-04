@@ -1,0 +1,22 @@
+{
+  "title": "Workflows",
+  "icon": "Workflow",
+  "root": true,
+  "pages": [
+    "index",
+    "---Start---",
+    "first-workflow",
+    "---Build---",
+    "editor",
+    "triggers",
+    "variables",
+    "ai",
+    "connections",
+    "---Test and run---",
+    "testing",
+    "review-and-schedule",
+    "runs",
+    "---Examples---",
+    "...examples"
+  ]
+}

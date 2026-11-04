@@ -1,0 +1,160 @@
+appId: com.openpost.app
+---
+- launchApp
+- openLink: openpost:///drafts
+- runFlow: open-link-guard.yaml
+- runFlow:
+    when:
+      visible: "Open in.*OpenPost.*"
+    commands:
+      - tapOn: Open
+- runFlow: settings-guard.yaml
+- extendedWaitUntil:
+    visible: Recent drafts
+    timeout: 120000
+- takeScreenshot: drafts-${SCHEME}
+# Open page captures through their public routes, independently of native
+# tab-bar gesture timing after the development-client launch.
+- openLink: com.openpost.app:///calendar
+- runFlow: open-link-guard.yaml
+- extendedWaitUntil:
+    visible: October 2026
+    timeout: 20000
+- takeScreenshot: calendar-${SCHEME}
+- openLink: com.openpost.app:///analytics
+- runFlow: open-link-guard.yaml
+- assertVisible: Followers
+- assertVisible: Trends
+- takeScreenshot: analytics-${SCHEME}
+- openLink: com.openpost.app:///inbox
+- runFlow: open-link-guard.yaml
+- extendedWaitUntil:
+    visible: Chats
+    timeout: 20000
+- assertVisible: Activity
+- takeScreenshot: inbox-preview-${SCHEME}
+- openLink: com.openpost.app:///drafts
+- runFlow: open-link-guard.yaml
+- extendedWaitUntil:
+    visible: Recent drafts
+    timeout: 20000
+# Open the composer through its route, matching the other page captures,
+# because a tap on the wrapped draft title races the navigation to editor.
+- openLink: com.openpost.app:///publications/draft-one/edit
+- runFlow: open-link-guard.yaml
+- extendedWaitUntil:
+    visible: ".*Social Set.*"
+    timeout: 20000
+- assertVisible: Queue next slot
+- takeScreenshot: composer-${SCHEME}
+- tapOn: ".*Choose Social Set and destinations.*"
+- assertVisible: Shortform writing
+- assertVisible: ".*Studio team.*"
+- assertVisible: Close
+- tapOn: Close
+
+- runFlow: settings-guard.yaml
+- tapOn: Cancel
+- runFlow: settings-guard.yaml
+- tapOn:
+    text: Ideate
+    index: 0
+- runFlow: settings-guard.yaml
+# The Ideate tap can lose to the settings takeover before the overlay opens;
+# open it again when it did not appear.
+- runFlow:
+    when:
+      notVisible: ".*Your idea.*"
+    commands:
+      - tapOn:
+          text: Ideate
+          index: 0
+      - runFlow: settings-guard.yaml
+- extendedWaitUntil:
+    visible: ".*Your idea.*"
+    timeout: 20000
+- tapOn: ".*Your idea.*"
+- inputText: I deleted 15,000 lines and the product has more features now.
+- tapOn: What do you want to post about?
+- runFlow: settings-guard.yaml
+- extendedWaitUntil:
+    visible: Give me four posts
+    timeout: 20000
+- takeScreenshot: ideate-input-${SCHEME}
+- tapOn: Give me four posts
+- extendedWaitUntil:
+    visible: The shorter version
+    timeout: 20000
+- extendedWaitUntil:
+    visible: "Me: i deleted 15,000 lines.*"
+    timeout: 20000
+- runFlow: settings-guard.yaml
+- waitForAnimationToEnd
+- takeScreenshot: ideate-${SCHEME}
+- scrollUntilVisible:
+    element: A message from the codebase
+    direction: DOWN
+- takeScreenshot: ideate-visual-${SCHEME}
+- scrollUntilVisible:
+    element: Demo video needed.*
+    direction: DOWN
+- assertVisible: Show what changed
+- scrollUntilVisible:
+    element: The engineering take
+    direction: DOWN
+- takeScreenshot: ideate-fourth-${SCHEME}
+
+- scrollUntilVisible:
+    element: A message from the codebase
+    direction: UP
+    centerElement: true
+- tapOn:
+    text: Use this post
+    below: A message from the codebase
+    index: 0
+- extendedWaitUntil:
+    visible: Destinations.*
+    timeout: 20000
+- runFlow: settings-guard.yaml
+- tapOn: Bluesky, @studio.bsky.social, draft
+- assertVisible: No text
+- takeScreenshot: ideate-selected-${SCHEME}
+
+- tapOn: Back
+- runFlow: settings-guard.yaml
+- openLink: com.openpost.app:///privacy
+- runFlow: open-link-guard.yaml
+- extendedWaitUntil:
+    visible: App analytics
+    timeout: 20000
+- assertVisible: Decline
+- assertVisible: Allow analytics
+- tapOn: Decline
+- assertVisible: Decline, Selected
+- takeScreenshot: privacy-${SCHEME}
+
+- openLink: com.openpost.app:///publications/client-review
+- runFlow: open-link-guard.yaml
+- extendedWaitUntil:
+    visible: Client review
+    timeout: 20000
+- scrollUntilVisible:
+    element: Please review this launch version.
+    direction: DOWN
+- scrollUntilVisible:
+    element: ".*Submitted launch title.*"
+    direction: DOWN
+- assertVisible: ".*Submitted launch description.*"
+- runFlow: settings-guard.yaml
+- takeScreenshot: client-review-${SCHEME}
+- scrollUntilVisible:
+    element: Approve this version
+    direction: DOWN
+- tapOn: Approve this version
+- scrollUntilVisible:
+    element: Client approved.*
+    direction: UP
+    timeout: 20000
+- assertNotVisible: Approve this version
+- runFlow: settings-guard.yaml
+- takeScreenshot: client-approved-${SCHEME}

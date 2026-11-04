@@ -1,0 +1,20 @@
+---
+title: Automate
+description: Choose the SDK, HTTP API, CLI, or n8n for an integration.
+icon: Code2
+---
+
+Choose the interface for your integration. Each uses OpenPost's workspace permissions, provider checks, and publishing jobs.
+
+| Interface                       | Use it for                                             |
+| ------------------------------- | ------------------------------------------------------ |
+| [TypeScript SDK](/automate/sdk) | JavaScript or TypeScript on Node.js, Bun, or Workers   |
+| [HTTP API](/automate/api)       | Other languages or raw HTTP requests                   |
+| [CLI](/automate/cli)            | Shell commands, scripts, and CI jobs                   |
+| [n8n](/automate/n8n)            | Visual workflows with timers, webhooks, or other nodes |
+
+For automation in OpenPost, use [Workflows](/workflows). For an assistant operating your account, use [AI assistants](/mcp).
+
+Start by listing the workspaces your credentials can access. Then create an unpublished draft and inspect its accounts, text, media, and settings before adding scheduling or publishing.
+
+Before running unattended work, read [Handle SDK jobs, conflicts, and errors](/automate/sdk/reliability), [Handle API revisions, retries, and jobs](/automate/api/reliability), and [Handle n8n retries and failures](/automate/n8n/reliability). They explain revisions, safe retries, and how to check each destination after a background job. The [API reference](/api-reference) lists the HTTP operations and schemas.

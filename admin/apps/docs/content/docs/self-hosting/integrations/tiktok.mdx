@@ -1,0 +1,63 @@
+---
+title: TikTok
+description: Configure TikTok Login Kit and Content Posting API for video and photo posts.
+icon: tiktok
+---
+
+OpenPost connects a TikTok account through Login Kit. Direct Post publishes through TikTok's Content Posting API; Upload sends a video to the creator's TikTok inbox for completion there.
+
+## Check Direct Post eligibility first
+
+TikTok's [Content Sharing Guidelines](https://developers.tiktok.com/doc/content-sharing-guidelines/) require Direct Post applications to serve a broad audience. An app used only to publish to accounts you or your team manage is not eligible for approval. A self-hosted app can qualify if its actual intended use meets TikTok's requirements; self-hosting alone does not decide eligibility.
+
+Unaudited Direct Post apps can publish only with `SELF_ONLY` visibility, and their posting accounts must be private. Public Direct Post requires a successful TikTok audit. Connecting an account or saving valid credentials does not grant this approval. Upload sends videos to the creator's TikTok inbox for completion and has separate product and scope requirements.
+
+## What you need
+
+- Set `OPENPOST_APP_URL` to the public HTTPS origin of your instance.
+- Make `OPENPOST_MEDIA_URL` a public HTTPS media address that TikTok can fetch. For URL-based publishing, verify its domain or URL prefix in TikTok's developer portal.
+- Have a [TikTok for Developers](https://developers.tiktok.com/) account and a TikTok account for testing. TikTok app review and Content Posting API access are separate from OAuth setup.
+
+## Configure the TikTok app
+
+1. In [TikTok for Developers](https://developers.tiktok.com/apps/), create an app. Add **Login Kit** and **Content Posting API**. TikTok calls the app's client ID a **Client Key**.
+2. In Login Kit, register this **Redirect URI**:
+
+   ```text
+   https://post.example.com/api/v1/accounts/tiktok/callback
+   ```
+
+3. Enable the posting modes you need. OpenPost requests `user.info.basic`, `video.publish` for Direct Post, and `video.upload` for inbox upload. Verify ownership of the media domain or URL prefix in the portal.
+4. For Display API features, obtain `user.info.profile`, `user.info.stats`, and `video.list`. Without approval, set `OPENPOST_DISABLE_TIKTOK_DISPLAY_API=true`. OpenPost then requests only `user.info.basic`, `video.publish`, and `video.upload`. Basic identity still works, including the account's display name and avatar; username, analytics, and public video ID reconciliation need the Display API scopes.
+5. Submit the app and its scopes for review where TikTok requires it. Copy the **Client Key** and **Client Secret** from the app settings.
+
+TikTok documents [app registration](https://developers.tiktok.com/docs/en/getting-started-create-an-app), [Direct Post setup](https://developers.tiktok.com/docs/en/content-posting-api-get-started), and [media URL verification](https://developers.tiktok.com/docs/en/content-posting-api-media-transfer-guide).
+
+## Save the app in OpenPost
+
+[Save these credentials](/self-hosting/integrations#save-your-provider-credentials) with your own domain and app values:
+
+```json
+[
+  {
+    "provider": "tiktok",
+    "client_id": "your-tiktok-client-key",
+    "client_secret": "your-tiktok-client-secret",
+    "redirect_uri": "https://post.example.com/api/v1/accounts/tiktok/callback"
+  }
+]
+```
+
+## Connect and test
+
+1. In **Settings → Workspace → Social accounts**, select **TikTok** and grant the requested permissions.
+2. Create a post with one video. Choose **Direct Post** for publishing or **Upload** to finish the video in TikTok. Confirm the result in OpenPost and in the TikTok account.
+3. Test photo posts separately if your app has photo-post access. Photo posts use public HTTPS media URLs. An unaudited TikTok client restricts Direct Post visibility to private even after a successful connection.
+
+## Troubleshoot
+
+| Problem                      | Check                                                                                                                                                                    |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| OAuth fails                  | Compare the Login Kit redirect URI with the JSON and `OPENPOST_APP_URL` exactly. Check app status and requested scopes.                                                  |
+| TikTok cannot fetch media    | Open a specific uploaded file URL under `OPENPOST_MEDIA_URL` from outside your network, confirm HTTPS, and check that the URL falls under the verified domain or prefix. |
+| Posting is denied or private | Check Content Posting API product access, the approved `video.publish` or `video.upload` scope, account consent, and TikTok audit status. Reconnect after adding scopes. |

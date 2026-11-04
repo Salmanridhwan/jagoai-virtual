@@ -1,0 +1,68 @@
+---
+title: Command-line interface
+description: Install the CLI, sign in, and choose a workspace.
+icon: Terminal
+---
+
+The `openpost` CLI controls a running Hosted or self-hosted OpenPost instance. It follows the same workspace permissions and Publication lifecycle as the web app.
+
+Use it when work starts in a terminal. For a long-running JavaScript or TypeScript service, use the [SDK](/automate/sdk). For a visual workflow, use [n8n](/automate/n8n).
+
+## Install
+
+Install the npm wrapper, which downloads and verifies the matching release binary:
+
+```sh
+npm install -g @getopenpost/cli
+```
+
+You can also download the binary from [GitHub Releases](https://github.com/getopenpost/openpost/releases).
+
+## Sign in
+
+Browser sign-in is the shortest path for an interactive shell:
+
+```sh
+openpost auth login https://app.openpo.st
+```
+
+For a headless shell, print the verification URL and code:
+
+```sh
+openpost auth login https://app.openpo.st --device
+```
+
+For CI, pass a developer token through stdin:
+
+```sh
+printf '%s\n' "$OPENPOST_TOKEN" | \
+  openpost auth login https://app.openpo.st --with-token
+```
+
+The CLI stores named instance profiles. Use them to keep Hosted, staging, and self-hosted credentials separate:
+
+```sh
+openpost instance add hosted https://app.openpo.st
+openpost instance use hosted
+openpost instance health
+```
+
+## Select a workspace
+
+```sh
+openpost workspace list
+openpost workspace use personal
+openpost account list
+```
+
+The selected workspace belongs to the active profile. You can override profile, instance, workspace, or token for one command with `--profile`, `--instance`, `--workspace`, or `--token`.
+
+Connect new social accounts in the web app at `<instance>/settings?tab=accounts`. The CLI does not collect provider credentials.
+
+Run `openpost help` or `openpost <group> <command> --help` for the installed version. New records store `creation_source: "cli"`.
+
+## Continue
+
+- [Create and publish content](/automate/cli/publishing)
+- [Run scripts and CI](/automate/cli/scripts-and-ci)
+- [Inspect and recover](/automate/cli/inspect-and-recover)

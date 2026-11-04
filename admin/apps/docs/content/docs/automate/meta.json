@@ -1,0 +1,20 @@
+{
+  "title": "Automate",
+  "icon": "Code2",
+  "root": true,
+  "pages": [
+    "index",
+    "---TypeScript SDK---",
+    "[TypeScript SDK](/automate/sdk)",
+    "...sdk",
+    "---HTTP API---",
+    "[HTTP API](/automate/api)",
+    "...api",
+    "---Command-line interface---",
+    "[Command-line interface](/automate/cli)",
+    "...cli",
+    "---n8n workflows---",
+    "[n8n workflows](/automate/n8n)",
+    "...n8n"
+  ]
+}

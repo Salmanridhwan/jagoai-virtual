@@ -1,0 +1,57 @@
+---
+title: Threads
+description: Create a Threads API app and connect a Threads account to OpenPost.
+icon: threads
+---
+
+OpenPost uses the Threads API and its own OAuth callback. A Threads app is configured separately from Facebook Login, even if you use the same Meta developer account.
+
+## What you need
+
+- Set `OPENPOST_APP_URL` to your instance's public HTTPS origin. Set `OPENPOST_MEDIA_URL` to a public HTTPS address if you will publish images, videos, or carousels.
+- Have a [Meta developer account](https://developers.facebook.com/) and a Threads account for testing.
+- Check Meta's app mode, tester roles, permission access, and review requirements before inviting other users. A successful test connection does not establish production access.
+
+## Configure the Threads app
+
+1. In the [Meta for Developers dashboard](https://developers.facebook.com/apps/), create an app with the **Threads API** use case or add the Threads API product to an eligible app. Open its Threads API settings.
+2. Add this **Redirect URL** for OAuth:
+
+   ```text
+   https://post.example.com/api/v1/accounts/threads/callback
+   ```
+
+3. Configure access for `threads_basic`, `threads_content_publish`, `threads_read_replies`, `threads_manage_replies`, `threads_manage_mentions`, `threads_manage_insights`, and `threads_location_tagging`. OpenPost requests these during authorization. `threads_read_replies` and `threads_manage_replies` support comment and reply features; `threads_manage_mentions` supports the mentions inbox. Complete Meta's review for features and users beyond the app's test roles.
+4. For a development app, open **App roles → Roles**, add the Threads account as a **Threads Tester**, and send the invitation. Sign in to that Threads account, open **Settings → Account → Website permissions → Invites**, and accept it. The account must accept the invitation before it can authorize the app.
+5. Copy the Threads app's **App ID** and **App Secret** from its settings.
+
+Meta's [Threads API documentation](https://developers.facebook.com/docs/threads/) and [official Threads API collection](https://www.postman.com/meta/threads/documentation/dht3nzz/threads-api) describe setup, consent, and publishing.
+
+## Save the app in OpenPost
+
+[Save these credentials](/self-hosting/integrations#save-your-provider-credentials) with your own domain and app values:
+
+```json
+[
+  {
+    "provider": "threads",
+    "client_id": "your-threads-app-id",
+    "client_secret": "your-threads-app-secret",
+    "redirect_uri": "https://post.example.com/api/v1/accounts/threads/callback"
+  }
+]
+```
+
+## Connect and test
+
+1. In **Settings → Workspace → Social accounts**, select **Threads** and complete the Threads consent flow.
+2. Publish a short text post. Confirm its status in OpenPost and open it on Threads.
+3. If you need media, publish one image next. Meta fetches media from your public HTTPS address. Test carousels and other features separately. Optional Comments and replies and Analytics start disabled per account; location tagging requires its own granted permission.
+
+## Troubleshoot
+
+| Problem                                         | Check                                                                                                                                           |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| OAuth fails                                     | Compare the Threads API redirect URL with the JSON and public `OPENPOST_APP_URL` exactly. Check the app's tester roles, mode, and permissions.  |
+| Text works but media fails                      | Fetch the exact public media URL from outside your network and check HTTPS, file bytes, and media type. A localhost or private URL cannot work. |
+| Replies, insights, or locations are unavailable | Check the corresponding Threads permission and account grant. Reconnect accounts authorized before that permission was added.                   |

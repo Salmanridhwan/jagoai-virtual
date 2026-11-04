@@ -1,0 +1,20 @@
+{
+  "title": "Guides",
+  "icon": "BookOpen",
+  "root": true,
+  "pages": [
+    "quickstart",
+    "accounts",
+    "workspaces",
+    "---Publish---",
+    "publishing",
+    "---Media---",
+    "media-library",
+    "screenshot-templates",
+    "media-limits",
+    "---Results---",
+    "analytics",
+    "inbox",
+    "troubleshooting"
+  ]
+}

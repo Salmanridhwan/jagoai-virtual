@@ -1,0 +1,110 @@
+@import 'tailwindcss';
+@import '@openpost/dither/style.css';
+@import 'tw-animate-css';
+@import '@fontsource-variable/geist';
+@import '@fontsource-variable/geist-mono';
+@import '@fontsource-variable/manrope/wght.css';
+@import '@fontsource-variable/dm-sans/wght.css';
+@import '@fontsource-variable/space-grotesk/wght.css';
+@import '@fontsource-variable/playfair-display/wght.css';
+@import '@fontsource-variable/source-serif-4/wght.css';
+@import '@fontsource/anton/400.css';
+@import '@fontsource/bebas-neue/400.css';
+@import '@fontsource-variable/inter';
+@import '@fontsource-variable/inter-tight';
+@import '@fontsource-variable/orbitron';
+@import '@fontsource/roboto/latin-400.css';
+@import '@fontsource/roboto/latin-400-italic.css';
+@import '@fontsource/roboto/latin-500.css';
+@import '@fontsource/roboto/latin-500-italic.css';
+@import '@fontsource/roboto/latin-600.css';
+@import '@fontsource/roboto/latin-600-italic.css';
+@import '@fontsource/roboto/latin-700.css';
+@import '@fontsource/roboto/latin-700-italic.css';
+@import '@fontsource/roboto-slab/latin-400.css';
+@import '@fontsource/roboto-slab/latin-500.css';
+@import '@fontsource/roboto-slab/latin-700.css';
+
+.video-editor-theme {
+	--video-editor-canvas: var(--background);
+	--video-editor-panel: var(--card);
+	--video-editor-control: var(--action-ordinary);
+	--video-editor-control-hover: var(--action-ordinary-hover);
+	--video-editor-border: var(--border);
+	--video-editor-muted: var(--muted-foreground);
+	--video-editor-text: var(--foreground);
+	--video-editor-focus: var(--ring);
+	--video-editor-focus-border: var(--ring);
+	--video-editor-field: var(--field);
+	--video-editor-field-text: var(--field-foreground);
+	--video-editor-selection: var(--selection);
+	--video-editor-selection-text: var(--selection-foreground);
+	--video-editor-primary: var(--action-primary);
+	--video-editor-primary-text: var(--action-primary-foreground);
+	--video-editor-danger: var(--action-destructive);
+	--video-editor-danger-text: var(--action-destructive-foreground);
+	--video-editor-warning: var(--warning);
+	--video-editor-warning-text: var(--warning-foreground);
+}
+
+.editor-protected-surface {
+	--video-editor-canvas: var(--editor-canvas);
+	--video-editor-panel: var(--editor-panel);
+	--video-editor-control: var(--editor-control);
+	--video-editor-control-hover: var(--editor-control-hover);
+	--video-editor-border: var(--editor-border);
+	--video-editor-muted: var(--editor-muted);
+	--video-editor-text: var(--editor-text);
+	--video-editor-focus: var(--editor-focus);
+	--video-editor-focus-border: var(--editor-focus-border);
+	--video-editor-field: var(--editor-control);
+	--video-editor-field-text: var(--editor-text);
+	--video-editor-selection: color-mix(in oklch, var(--editor-focus) 22%, var(--editor-panel));
+	--video-editor-selection-text: var(--editor-text);
+	--video-editor-primary: var(--editor-focus);
+	--video-editor-primary-text: var(--canvas-pasteboard);
+	--video-editor-danger: var(--action-destructive);
+	--video-editor-danger-text: var(--action-destructive-foreground);
+	--video-editor-warning: var(--warning);
+	--video-editor-warning-text: var(--warning-foreground);
+}
+
+:is(.editor-protected-surface, [data-editor-protected]) {
+	scrollbar-color: var(--editor-border) var(--editor-canvas);
+}
+
+@source '../../../../packages/social-preview/src';
+
+@custom-variant dark (&:is(.dark *));
+@plugin '@tailwindcss/forms';
+@plugin '@tailwindcss/typography';
+
+@import '@openpost/ui/style.css';
+
+@layer components {
+	/*
+	 * Shared pasteboard checkerboard behind the image-editor canvas stage
+	 * and the template preview frame. Defined once here (not scoped) so the
+	 * two surfaces cannot drift apart; tokens follow the active color scheme.
+	 */
+	.pasteboard-checker {
+		--image-editor-checker-light: color-mix(
+			in oklch,
+			var(--canvas-pasteboard) 82%,
+			var(--canvas-grid)
+		);
+		--image-editor-checker-dark: var(--canvas-grid);
+		background-color: var(--image-editor-checker-light);
+		background-image:
+			linear-gradient(45deg, var(--image-editor-checker-dark) 25%, transparent 25%),
+			linear-gradient(-45deg, var(--image-editor-checker-dark) 25%, transparent 25%),
+			linear-gradient(45deg, transparent 75%, var(--image-editor-checker-dark) 75%),
+			linear-gradient(-45deg, transparent 75%, var(--image-editor-checker-dark) 75%);
+		background-position:
+			0 0,
+			0 8px,
+			8px -8px,
+			-8px 0;
+		background-size: 16px 16px;
+	}
+}

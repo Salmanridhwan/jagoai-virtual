@@ -1,0 +1,152 @@
+---
+title: Instagram
+description: Connect Instagram directly or through a linked Facebook Page.
+icon: instagram
+---
+
+OpenPost connects Instagram **Business** and **Creator** accounts in two ways. **Continue with Instagram** signs in directly and does not need a Facebook Page. **Continue with Facebook** connects through a Facebook Page you manage. Neither method supports personal Instagram accounts.
+
+## What you need
+
+- Set `OPENPOST_APP_URL` to your instance's public HTTPS origin and `OPENPOST_MEDIA_URL` to a public HTTPS media address. Meta must fetch media before it can publish it.
+- Switch the target Instagram account to **Business** or **Creator**. Only the Facebook Login method needs a linked Page and a person who can manage it.
+- Have access to a [Meta developer app](https://developers.facebook.com/apps/) and plan for app review and business verification where Meta requires them. App-role testing in development mode does not grant access to other users.
+
+## Set up direct Instagram login
+
+Use this method when you do not have a linked Facebook Page, or want to sign in with Instagram directly.
+
+1. In the [Meta for Developers dashboard](https://developers.facebook.com/apps/), open your app and add Instagram. Choose **API setup with Instagram login**, then configure Instagram Business Login.
+2. Add this exact redirect URI, using your own domain:
+
+   ```text
+   https://post.example.com/api/v1/accounts/instagram/callback
+   ```
+
+3. Request the permissions OpenPost includes in consent:
+
+   ```text
+   instagram_business_basic
+   instagram_business_content_publish
+   instagram_business_manage_comments
+   instagram_business_manage_messages
+   instagram_business_manage_insights
+   ```
+
+   Complete Meta's app review and business verification for your intended users. Development testing requires the Instagram account to accept its tester invitation. Optional features need their corresponding approved permissions.
+
+4. Copy the **Instagram App ID** and **Instagram App Secret** from the Instagram API setup screen. These are the Instagram credentials, not the Facebook Login credentials under the app's basic settings.
+5. In **Settings → Instance → Configuration → Provider apps**, choose **Instagram (direct login)**, enter those credentials and the redirect URI, then save and restart OpenPost.
+
+Alternatively, append this entry to your existing `OPENPOST_PROVIDER_APPS` array:
+
+```json
+{
+  "provider": "instagram",
+  "connection_mode": "instagram_login",
+  "client_id": "your-instagram-app-id",
+  "client_secret": "your-instagram-app-secret",
+  "redirect_uri": "https://post.example.com/api/v1/accounts/instagram/callback"
+}
+```
+
+OpenPost refreshes direct-login access tokens before they expire. An expired or revoked token needs reconnection. Direct login does not offer Shopping tags or Facebook Page location search. See Meta's [Instagram Login documentation](https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login/), [Content Publishing guide](https://developers.facebook.com/documentation/instagram-platform/content-publishing), and [official API collection](https://www.postman.com/meta/instagram/folder/6raa77c/instagram-api-with-instagram-login).
+
+## Set up Facebook Login
+
+1. In the [Meta for Developers dashboard](https://developers.facebook.com/apps/), create or open an app with **Facebook Login** and the Instagram API with Facebook Login. This is the Page-linked integration, not Instagram Login for standalone accounts.
+2. In **Facebook Login → Settings**, add this **Valid OAuth Redirect URI**:
+
+   ```text
+   https://post.example.com/api/v1/accounts/instagram/callback
+   ```
+
+3. Request the permissions OpenPost includes in consent:
+
+   ```text
+   business_management
+   instagram_basic
+   instagram_content_publish
+   instagram_manage_comments
+   instagram_manage_messages
+   instagram_manage_insights
+   pages_show_list
+   pages_read_engagement
+   pages_read_user_content
+   pages_manage_metadata
+   ```
+
+   Complete Meta's review for your intended users. `instagram_basic` has a Page dependency on `pages_read_user_content`. Conversation reads need `instagram_basic`, `instagram_manage_messages`, and `pages_manage_metadata`, plus a Meta app owned by a verified business.
+
+4. Copy **App ID** and **App Secret** from **App settings → Basic**. Confirm the Instagram professional account is linked to the Page returned for your test user.
+
+Meta's [Instagram API documentation](https://developers.facebook.com/docs/instagram-platform/instagram-api-with-facebook-login/) describes the Page-linked account model and permissions. Its [Content Publishing guide](https://developers.facebook.com/docs/instagram-platform/instagram-api-with-facebook-login/content-publishing/) describes media requirements.
+
+### New Meta apps: Unified Login with `config_id`
+
+Meta now forces newer apps onto its **Unified Login** setup. If your app was created recently, the dashboard shows:
+
+> API setup with Instagram login is not available for newer apps. Your app uses API setup with Unified login instead.
+
+When that happens, the standalone Instagram authorize endpoint rejects the app with "Invalid platform app", and the Facebook dialog rejects explicit permission lists with "Invalid Scopes". Apps created before the change keep working with the scope-based flow above.
+
+For a newer app, authorize through a **Facebook Login for Business** configuration instead of a scope list:
+
+1. In the [Meta for Developers dashboard](https://developers.facebook.com/apps/), open your app and go to **Use cases → Manage messaging & content on Instagram → Customize → API setup with Unified login**. The app must be owned by a business portfolio for the tab to appear.
+2. Select **Create new configuration**, grant it the Instagram permissions OpenPost needs (`instagram_basic`, `instagram_content_publish`, `instagram_manage_comments`, `instagram_manage_messages`, `instagram_manage_insights`), and select **Use this configuration**.
+3. Enter your redirect URI and copy the **Configuration ID** (`config_id`). OpenPost sends this ID instead of a permission list: Meta's login dialog replaces the `scope` parameter with the configuration, and the code exchange endpoint stays the same.
+
+Then add the Configuration ID to your Instagram entry. The field is optional; the example without `config_id` keeps using the permission list:
+
+```json
+[
+  {
+    "provider": "instagram",
+    "client_id": "your-meta-app-id",
+    "client_secret": "your-meta-app-secret",
+    "redirect_uri": "https://post.example.com/api/v1/accounts/instagram/callback",
+    "config_id": "your-facebook-login-for-business-configuration-id"
+  }
+]
+```
+
+See Meta's [Instagram API with Unified Login](https://developers.facebook.com/documentation/instagram-platform/instagram-api-with-unified-login) and [Facebook Login for Business](https://developers.facebook.com/docs/facebook-login/facebook-login-for-business/) documentation for the configuration model.
+
+End-to-end verification of this flow against a freshly created Meta app is still pending ([issue #495](https://github.com/getopenpost/openpost/issues/495)). If your new app behaves differently than described here, please report it there.
+
+### Save the Facebook Login app in OpenPost
+
+[Save these credentials](/self-hosting/integrations#save-your-provider-credentials) with your own domain and app values:
+
+```json
+[
+  {
+    "provider": "instagram",
+    "client_id": "your-meta-app-id",
+    "client_secret": "your-meta-app-secret",
+    "redirect_uri": "https://post.example.com/api/v1/accounts/instagram/callback"
+  }
+]
+```
+
+## Connect and test
+
+1. In **Settings → Workspace → Social accounts**, select **Instagram** and choose **Continue with Instagram** or **Continue with Facebook**. A method that the administrator has not configured is disabled. Both methods can be configured on the same server.
+2. For direct login, authorize the Instagram professional account. For Facebook Login, sign in with the person who manages the linked Page, grant Page access, and select the Instagram account returned by Meta.
+3. Publish one image with a short caption. Confirm the result in OpenPost and on Instagram. Test Reels, carousels, and Stories separately if you need them. Instagram requires media; OpenPost can turn text-only drafts into image cards before publishing. Optional Comments and replies, Direct messages, and Analytics start disabled per account.
+
+## Troubleshoot
+
+| Problem                                                            | Check                                                                                                                                                                                                            |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Connection method is disabled                                      | Configure that method's provider app and restart OpenPost. Direct login uses `connection_mode: "instagram_login"`; Facebook Login omits it or uses `"oauth"`. Keep both entries to offer both methods.           |
+| No Instagram account appears through Facebook                      | Verify it is Business or Creator, linked to a Page the signed-in person can manage, and that the Page and Instagram permissions were granted. Without a linked Page, choose **Continue with Instagram** instead. |
+| Media creation fails                                               | Fetch a specific uploaded file URL under `OPENPOST_MEDIA_URL` from outside your network. It must be public HTTPS and return the correct file and media type.                                                     |
+| Permission or redirect error                                       | Check app review, the scopes granted in consent, and the exact redirect URI. Reconnect after changing permissions.                                                                                               |
+| New Meta app fails with "Invalid platform app" or "Invalid Scopes" | Meta forces newer apps onto Unified Login. Use a Facebook Login for Business configuration and add its `config_id` to the Instagram provider app entry. Apps created before the change are unaffected.           |
+
+If Instagram shows the post but OpenPost reports a failed or uncertain delivery, do not publish it again. Graph error `100/33` can mean the object is inaccessible or the operation is unsupported; it does not prove that a Facebook Page or Instagram post was deleted. OpenPost keeps an ambiguous final publish request pending and checks the saved container without repeating the publish request.
+
+For failed publishing requests, the server log identifies the Graph host, operation, endpoint template, object ID, HTTP status, and safe provider codes when available. It excludes access tokens, captions, media URLs, and provider response bodies. These details distinguish container creation, container status, and the final publish request.
+
+Direct messages need their own account opt-in and the message-management permission for the selected login method. The person must message the professional account first. A provider collection failure and an HTTP 500 from `/inbox/changes` are separate signals: the latter reads stored inbox updates and needs server-side investigation.

@@ -1,0 +1,120 @@
+---
+title: Self-host OpenPost
+description: Run OpenPost on your own server with Docker Compose.
+icon: docker
+---
+
+Run OpenPost with Docker Compose, SQLite, and local media storage. One container serves the app and runs background jobs.
+
+## What you need
+
+- Install Docker with the Compose plugin. Run the commands below on the server that will host OpenPost.
+- The published image supports `linux/amd64` and `linux/arm64`. Docker selects the native image for the host.
+- For a public instance, point a domain at the server and put an HTTPS reverse proxy in front of port `8080`. Forward all app requests, including `/api/v1/` and `/media/`. Provider callbacks and media URLs must be reachable from outside your network.
+
+You can test locally first. Set the final public URLs before connecting social accounts.
+
+## Install with Docker Compose
+
+Create the data directories first:
+
+```sh
+mkdir -p openpost/data/db openpost/data/media
+cd openpost
+```
+
+Create `.env` with fresh secrets:
+
+```sh
+cat > .env <<EOF
+OPENPOST_APP_URL=http://localhost:8080
+OPENPOST_PUBLIC_URL=http://localhost:8080
+OPENPOST_MEDIA_URL=http://localhost:8080/media
+OPENPOST_JWT_SECRET=$(openssl rand -base64 32)
+OPENPOST_ENCRYPTION_KEY=$(openssl rand -base64 32)
+EOF
+chmod 600 .env
+```
+
+For a public deployment, replace all three URLs with the real HTTPS origin before connecting providers. For example, set `OPENPOST_APP_URL=https://post.example.com`, `OPENPOST_PUBLIC_URL=https://post.example.com`, and `OPENPOST_MEDIA_URL=https://post.example.com/media`. Keep both generated secrets stable across restarts and restores.
+
+Create `docker-compose.yml`:
+
+```yaml
+services:
+  openpost:
+    image: ghcr.io/getopenpost/openpost:latest
+    container_name: openpost
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      OPENPOST_PORT: 8080
+      OPENPOST_DATABASE_PATH: /data/db/openpost.db
+      OPENPOST_MEDIA_PATH: /data/media
+```
+
+The example uses `latest`. For production, replace it with a release tag from [GitHub Releases](https://github.com/getopenpost/openpost/releases) and record that tag with your backups. Read [upgrades and backups](/self-hosting/maintenance) before changing it.
+
+Start it:
+
+```sh
+docker compose up -d
+```
+
+## Check your installation
+
+1. Run `curl -fsS http://localhost:8080/api/v1/ready`. Expect `"status":"ready"` and `"database":"ok"`. S3 deployments also report storage readiness. If it fails, check `docker compose logs --tail=100 openpost`.
+2. For a public instance, check the same path through your [HTTPS proxy](/self-hosting/reverse-proxy).
+3. Open the app and create the first account. It becomes the instance administrator. Create a workspace and [configure your social integrations](/self-hosting/integrations).
+4. Connect an account and [publish a test post](/guides/quickstart). Check the result in OpenPost and on the social network.
+
+To close public signup afterward, set `OPENPOST_DISABLE_REGISTRATIONS=true` and recreate the container with `docker compose up -d --force-recreate openpost`. Existing accounts can still sign in.
+
+## Try it with Docker run
+
+Try OpenPost locally with `docker run` before committing to a permanent installation. Use [Docker Compose](#install-with-docker-compose) for a permanent installation.
+
+Create `.env` with the URLs and secrets from the [Compose setup](#install-with-docker-compose), then run the published image. Docker selects `linux/amd64` or `linux/arm64` for the host:
+
+```sh
+docker volume create openpost_data
+docker run -d --name openpost --restart unless-stopped \
+  -p 8080:8080 --mount source=openpost_data,target=/data --env-file .env \
+  -e OPENPOST_DATABASE_PATH=/data/db/openpost.db \
+  -e OPENPOST_MEDIA_PATH=/data/media \
+  -e OPENPOST_MEDIA_URL=http://localhost:8080/media \
+  ghcr.io/getopenpost/openpost:latest
+```
+
+Open `http://localhost:8080`, create the first account, and check `http://localhost:8080/api/v1/ready` for `"status":"ready"` and `"database":"ok"`.
+
+Move to [Docker Compose](#install-with-docker-compose) before connecting social accounts. Keep the same secrets, attach the existing `openpost_data` volume if you need the trial data, and replace the local URLs with the final HTTPS origin. Then configure [provider integrations](/self-hosting/integrations) and [backups](/self-hosting/maintenance).
+
+## Prepare for production
+
+Use a versioned image from [GitHub Releases](https://github.com/getopenpost/openpost/releases). [Back up and test a restore](/self-hosting/maintenance) of the database, media, deployment files, and secrets before relying on scheduled posts. Configure [email delivery](/self-hosting/email) before requiring email verification.
+
+## Choose a platform
+
+Use an existing platform if it already manages your server:
+
+| Platform                             | Installation method                        |
+| ------------------------------------ | ------------------------------------------ |
+| [Coolify](/self-hosting/coolify)     | Git repository with the Compose build pack |
+| [Dokploy](/self-hosting/dokploy)     | Compose service                            |
+| [Portainer](/self-hosting/portainer) | Docker Standalone stack                    |
+| [Dockge](/self-hosting/dockge)       | Stack with a Compose file and `.env`       |
+| [CasaOS](/self-hosting/casaos)       | Customized app import                      |
+| [ZimaOS](/self-hosting/zimaos)       | Custom app import                          |
+| [umbrelOS](/self-hosting/umbrelos)   | Portainer stack                            |
+| [NixOS](/self-hosting/nixos)         | Podman service module with sops secrets    |
+
+For other setups, [run the binary](/self-hosting/binary) or [try the Docker image](#try-it-with-docker-run).
+
+## Configure optional services
+
+[Configuration](/self-hosting/configuration) covers URLs, storage, and registration. Add [AI generation](/self-hosting/ai) or [email delivery](/self-hosting/email) when needed.
